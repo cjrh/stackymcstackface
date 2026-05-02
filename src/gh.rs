@@ -157,12 +157,7 @@ pub struct CreatePrOpts<'a> {
 
 /// Create a PR on `repo` from `head` into `base`, returning whatever `gh`
 /// printed (typically the new PR's URL).
-pub fn create_pr(
-    repo: &str,
-    base: &str,
-    head: &str,
-    opts: &CreatePrOpts<'_>,
-) -> Result<String> {
+pub fn create_pr(repo: &str, base: &str, head: &str, opts: &CreatePrOpts<'_>) -> Result<String> {
     let mut args: Vec<String> = vec![
         "pr".into(),
         "create".into(),
@@ -213,11 +208,7 @@ fn run_capture(args: &[&str]) -> Result<String> {
         .with_context(|| format!("failed to invoke gh {}", args.join(" ")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "gh {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        ));
+        return Err(anyhow!("gh {} failed: {}", args.join(" "), stderr.trim()));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

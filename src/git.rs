@@ -66,9 +66,14 @@ pub fn read_state() -> Result<RepoState> {
     let head_sha = run(&["rev-parse", "HEAD"])
         .map_err(|_| anyhow!("repository has no commits yet (HEAD is unborn)"))?;
     let branch = run(&["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
-    let upstream = run(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
-        .ok()
-        .and_then(|s| split_upstream(&s));
+    let upstream = run(&[
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+    ])
+    .ok()
+    .and_then(|s| split_upstream(&s));
     let in_progress = detect_in_progress(Path::new(&git_dir));
     Ok(RepoState {
         current_branch: branch,
@@ -157,7 +162,9 @@ pub fn resolve(rev: &str) -> Result<Option<String>> {
         .output()
         .context("failed to invoke git rev-parse")?;
     if output.status.success() {
-        Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ))
     } else {
         Ok(None)
     }
@@ -227,11 +234,7 @@ fn run(args: &[&str]) -> Result<String> {
         .with_context(|| format!("failed to invoke git {}", args.join(" ")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        ));
+        return Err(anyhow!("git {} failed: {}", args.join(" "), stderr.trim()));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

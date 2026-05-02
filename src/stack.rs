@@ -45,9 +45,8 @@ pub fn run(opts: &StackOpts) -> Result<()> {
     let branch = guard_state(&state)?;
 
     // Discover what we're pointed at on GitHub.
-    let local_repo = gh::repo_info(None).context(
-        "`gh repo view` failed; is this a GitHub repository and is `gh` authenticated?",
-    )?;
+    let local_repo = gh::repo_info(None)
+        .context("`gh repo view` failed; is this a GitHub repository and is `gh` authenticated?")?;
     let target_repo = resolve_merge_target(&local_repo)?;
 
     if branch == target_repo.default_branch {
@@ -111,8 +110,13 @@ pub fn run(opts: &StackOpts) -> Result<()> {
         draft: opts.draft,
         web: opts.web,
     };
-    let out = gh::create_pr(&target_repo.name_with_owner, base_branch, &branch, &create_opts)
-        .context("`gh pr create` failed")?;
+    let out = gh::create_pr(
+        &target_repo.name_with_owner,
+        base_branch,
+        &branch,
+        &create_opts,
+    )
+    .context("`gh pr create` failed")?;
     if !out.is_empty() {
         println!("{out}");
     }
@@ -240,9 +244,7 @@ fn rescue_wrong_remote(state: &RepoState, target_remote: &str, assume_yes: bool)
         // Force-flush so the prompt prints in line order even when stdout is a pipe.
         let _ = io::stderr().flush();
         Confirm::new()
-            .with_prompt(format!(
-                "Re-push to `{target_remote}` and switch tracking?"
-            ))
+            .with_prompt(format!("Re-push to `{target_remote}` and switch tracking?"))
             .default(true)
             .interact()
             .unwrap_or(false)
@@ -262,7 +264,12 @@ enum Parent {
     /// Stack on the default branch (a "regular" PR).
     Default { branch: String },
     /// Stack on top of an existing PR.
-    Pr { branch: String, number: u64, url: String, distance: usize },
+    Pr {
+        branch: String,
+        number: u64,
+        url: String,
+        distance: usize,
+    },
 }
 
 impl Parent {
@@ -295,9 +302,7 @@ fn pick_parent(
     for pr in prs {
         // Only consider PRs whose head lives on the merge-target repo. A
         // cross-repo PR's head SHA may not even exist locally.
-        if pr.is_cross_repository
-            || pr.head_repository_owner.to_ascii_lowercase() != target_owner
-        {
+        if pr.is_cross_repository || pr.head_repository_owner.to_ascii_lowercase() != target_owner {
             continue;
         }
         // Ignore the PR for the branch we're currently stacking (that's us,
