@@ -31,11 +31,16 @@ fiddly bits that are easy to get wrong:
 2. When you create the PR, you have to pick the right base branch by hand:
    the parent branch in the stack, not `main`.
 
-`stackymcstackface` automates exactly those two steps. Reviewing, merging,
-and rebasing all stay the normal GitHub workflow you already know. GitHub
-itself handles the part that matters most: when the parent PR merges into
-the default branch, child PRs automatically retarget to the default branch
-on their own.
+`stackymcstackface` automates exactly those two steps. Reviewing and
+rebasing stay the normal GitHub workflow you already know. So does
+merging, with one prerequisite: when a stack PR merges, GitHub only
+auto-retargets the next PR if the merged head branch is deleted through
+GitHub's own merge flow. That means the post-merge "Delete branch"
+button on the PR page, or the repo-level "Automatically delete head
+branches" setting. Manual `git push --delete origin <branch>` (or the
+equivalent low-level API call) bypasses the retarget logic and **closes**
+the next PR instead. See [Repo setup](#repo-setup-one-time) and
+[Merging a stack](#8-merging-a-stack).
 
 ## Design requirements
 
@@ -83,6 +88,33 @@ cargo install --path .
 ```
 
 This installs the binary as `stackymcstackface` on your `PATH`.
+
+### Repo setup (one-time)
+
+Two repository-level settings make stacking work end-to-end. Without
+them, the tool will still open stacked PRs, but the *after-merge* part
+of the workflow that GitHub handles will not work cleanly.
+
+1. **Enable "Automatically delete head branches".** When a stack PR
+   merges, GitHub deletes its head branch through the merge flow,
+   which is the only deletion path that retargets dependent PRs to
+   the merged PR's base.
+
+   ```sh
+   gh api -X PATCH /repos/<owner>/<repo> -f delete_branch_on_merge=true
+   ```
+
+   Web UI equivalent: Settings → General → Pull Requests →
+   "Automatically delete head branches".
+
+2. **Use merge commits or rebase merges, not squash, for stack PRs.**
+   Squashing replaces the merged branch's commits with one new commit
+   on `main`, so the next stack PR's parent SHA is no longer in
+   `main`'s history. The auto-retargeted PR then conflicts against the
+   squash commit and you have to rebase. Merge commits and rebase
+   merges keep the original commits on `main` and stack cleanly. Pick
+   per-merge in the GitHub UI, or restrict the repo defaults under
+   Settings → General → Pull Requests.
 
 ### Suggested alias
 
@@ -216,7 +248,30 @@ now be stacked under a new parent, change the base in the GitHub UI (or
 delete the old PR). Keeping `stack` from silently mutating PR bases is
 deliberate.
 
-### 7. Bail conditions
+### 8. Merging a stack
+
+Merge from the bottom up, one PR at a time:
+
+```sh
+gh pr merge 1 --merge   # or use the web UI; do NOT use --squash
+```
+
+With "Automatically delete head branches" enabled (see
+[Repo setup](#repo-setup-one-time)), GitHub deletes #1's head branch as
+part of the merge and retargets the next PR (say, #2) so its base
+becomes `main`. Repeat for #2, then #3, until the stack is empty.
+
+If you forgot to enable the setting, click the "Delete branch" button
+on the merged PR's page on GitHub. That deletion path also retargets
+dependents.
+
+What you must **not** do: clean up merged head branches with
+`git push --delete origin <branch>` or low-level `gh api` ref deletes.
+Those bypass GitHub's retarget logic; the next PR in the stack will be
+**closed**, not retargeted, and you will have to restore the deleted
+branch and reopen the PR to recover.
+
+### 9. Bail conditions
 
 `stack` refuses to run, with a clear message, in any of these states:
 
