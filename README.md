@@ -4,6 +4,22 @@ A small helper for stacked pull requests on GitHub, driven by the official
 [`gh`](https://cli.github.com/) CLI. One subcommand: `stack`. It pushes your
 current branch to the right remote and opens the PR with the right base.
 
+## Demo
+
+You are on a new branch built on top of an existing open PR. One command:
+
+```text
+$ stackymcstackface stack
+→ plan: push `feat/parser-tests` and open a STACKED PR on top of #421
+        (base `feat/parser-cleanup`)
+→ pushing `feat/parser-tests` to `origin` ...
+→ creating PR: head=`feat/parser-tests` base=`feat/parser-cleanup` ...
+https://github.com/octocat/widgets/pull/422
+```
+
+The new PR's base is the parent branch (not `main`), so GitHub treats it as
+stacked. When #421 merges, GitHub retargets #422 to `main` automatically.
+
 ## Goals
 
 The manual stacked-PR workflow on GitHub is not complicated, but it has two
