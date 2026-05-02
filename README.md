@@ -1,58 +1,59 @@
 # stackymcstackface
 
-A small, opinionated helper for **stacked pull requests on GitHub**, driven by
-the official [`gh`](https://cli.github.com/) CLI. One subcommand: `stack`. It
-pushes your current branch to the right remote and opens the PR with the right
-base.
+A small helper for stacked pull requests on GitHub, driven by the official
+[`gh`](https://cli.github.com/) CLI. One subcommand: `stack`. It pushes your
+current branch to the right remote and opens the PR with the right base.
 
 ## Goals
 
 The manual stacked-PR workflow on GitHub is not complicated, but it has two
 fiddly bits that are easy to get wrong:
 
-1. The branches must live on the **same remote** as the PRs themselves
-   (otherwise stacking silently breaks — particularly painful when working
-   from a fork).
-2. When you create the PR, you have to **pick the right base branch by hand**
-   — the parent branch in the stack, not `main`.
+1. The branches must live on the same remote as the PRs themselves
+   (otherwise stacking silently breaks, which is particularly painful when
+   working from a fork).
+2. When you create the PR, you have to pick the right base branch by hand:
+   the parent branch in the stack, not `main`.
 
-`stackymcstackface` automates exactly those two steps. Everything else
-— reviewing, merging, rebasing — stays the normal GitHub workflow you already
-know. Importantly, GitHub itself handles the part that matters most: when the
-parent PR merges into the default branch, child PRs automatically retarget to
-the default branch on their own.
+`stackymcstackface` automates exactly those two steps. Reviewing, merging,
+and rebasing all stay the normal GitHub workflow you already know. GitHub
+itself handles the part that matters most: when the parent PR merges into
+the default branch, child PRs automatically retarget to the default branch
+on their own.
 
 ## Design requirements
 
-These are the design constraints behind the tool. They are not negotiable —
-if you do not share them, this tool is not for you.
+These are the design constraints behind the tool. If you do not share them,
+this tool is probably not for you.
 
-- **No local state.** Other stacking tools maintain a sidecar file describing
-  the stack and its state. That file rots. When it disagrees with reality on
-  GitHub — which happens *most* once you have five or six PRs in a stack —
-  the tooling becomes harder to fix than the manual workflow it replaced.
-  Every invocation of `stack` reconstructs the picture from authoritative
-  sources only: `git fetch`, `git merge-base --is-ancestor`, and `gh pr list`.
-  There is nothing to keep in sync because there is nothing to sync.
+- **No local state.** Other stacking tools maintain a sidecar file
+  describing the stack and its state. That file rots. Once it disagrees
+  with reality on GitHub (which happens *most* once you have five or six
+  PRs in a stack), the tooling becomes harder to fix than the manual
+  workflow it replaced. Every invocation of `stack` reconstructs the
+  picture from authoritative sources only: `git fetch`,
+  `git merge-base --is-ancestor`, and `gh pr list`. Nothing to keep in
+  sync because there is nothing to sync.
 
 - **Push to the merge-target remote, never anywhere else.** For non-fork
-  repos that means `origin`. For forks, that almost always means `upstream`
-  (or whatever you call the remote pointing at the parent). The tool figures
-  this out by asking GitHub `isFork`/`parent` and matching against your
-  configured git remotes.
+  repos that means `origin`. For forks, it almost always means `upstream`
+  (or whatever you call the remote pointing at the parent). The tool
+  figures this out by asking GitHub for `isFork`/`parent` and matching
+  against your configured git remotes.
 
 - **Detect a wrong-remote push and offer to fix it.** If you have already
   pushed your branch to your fork's `origin`, the tool notices and prompts
   before re-pushing to the correct remote and switching the upstream
   tracking ref.
 
-- **Do as little as possible.** One subcommand. Push the branch. Open the
-  PR. Print the URL. That is the whole tool. No `submit-stack`, no
-  `restack`, no `land`, no merge orchestration — those are GitHub's job.
+- **Do as little as possible.** One subcommand. Push the branch, open the
+  PR, print the URL. That is the whole tool. There is no `submit-stack`,
+  no `restack`, no `land`, and no merge orchestration; GitHub already does
+  those.
 
 - **Refuse to act on a dirty repo state.** If the repo is mid-rebase,
   mid-merge, mid-cherry-pick, mid-revert, mid-bisect, or mid-`am`, `stack`
-  bails and tells you what it found. **Uncommitted changes are fine** — a
+  bails and tells you what it found. **Uncommitted changes are fine.** A
   common workflow is to peel one PR at a time off a large set of local
   changes.
 
@@ -69,7 +70,7 @@ This installs the binary as `stackymcstackface` on your `PATH`.
 
 ### Suggested alias
 
-The binary name is intentionally absurd. Pick a short alias for daily use —
+The binary name is intentionally absurd. Pick a short alias for daily use.
 `sms` is the obvious one:
 
 ```sh
@@ -88,7 +89,7 @@ Optional. By default the tool picks the merge-target remote automatically:
 `origin` if you are not on a fork, otherwise the local remote whose URL
 matches the parent repo on GitHub.
 
-If automatic detection picks wrong, or you simply want to be explicit:
+If automatic detection picks wrong, or you want to be explicit:
 
 ```sh
 git config stack.remote upstream
@@ -137,8 +138,8 @@ https://github.com/octocat/widgets/pull/422
 ```
 
 The parent is found by walking your branch's ancestry and picking the
-**closest** open PR whose head SHA is an ancestor of your `HEAD`. Repeat for
-as many levels as you like.
+**closest** open PR whose head SHA is an ancestor of your `HEAD`. The same
+logic applies at any level of the stack.
 
 ### 3. Working in a fork
 
@@ -150,8 +151,8 @@ upstream  git@github.com:octocat/widgets.git   (fetch / push)
 ```
 
 `sms stack` will detect the fork, identify `upstream` as the merge-target
-remote, and push your branches there — *not* to your fork's `origin`. This
-is the only configuration that lets stacking work in a fork. Both PR head
+remote, and push your branches there, *not* to your fork's `origin`. That
+is the only configuration that lets stacking work in a fork: both PR head
 and base must live on the same repo.
 
 ### 4. Wrong-remote rescue
@@ -181,8 +182,8 @@ Re-run `sms stack` with `--force-with-lease`:
 sms stack --force-with-lease
 ```
 
-If a PR for the branch already exists, the tool just refreshes the push and
-prints the existing PR URL — it does not try to recreate it.
+If a PR for the branch already exists, the tool just refreshes the push
+and prints the existing PR URL. It will not try to recreate it.
 
 ### 6. Re-running on an existing PR
 
@@ -244,18 +245,18 @@ sms stack [OPTIONS]
    whose head lives on the merge-target repo.
 6. For each such PR, ask `git merge-base --is-ancestor <pr-head> HEAD`.
    The closest ancestor (smallest `git rev-list --count`) is the parent.
-   No ancestor → base is the default branch.
+   No ancestor means the base is the default branch.
 7. Push the current branch to the merge-target remote with `--set-upstream`.
 8. `gh pr create --base <parent> --head <branch> --repo <merge-target>`.
 
-That is the entire algorithm. You can read it directly in
+You can read the same algorithm directly in
 [`src/stack.rs`](src/stack.rs).
 
 ## Non-goals
 
 These are explicitly out of scope and unlikely to ever be added:
 
-- A stack overview / visualisation command. `gh pr list` already shows it.
+- A stack overview or visualisation command. `gh pr list` already shows it.
 - A "submit the whole stack" command. `sms stack` per branch is plenty.
 - Auto-merging, auto-rebasing, conflict resolution, or any other workflow
   orchestration.
