@@ -21,7 +21,7 @@ mod stack;
                   on top of it; otherwise it targets the default branch.\n\n\
                   No local stack state is kept: every invocation reconstructs \
                   the picture from `git` and `gh`.",
-    version,
+    version
 )]
 struct Cli {
     #[command(subcommand)]
