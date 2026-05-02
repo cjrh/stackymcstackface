@@ -65,6 +65,8 @@ pub fn run(opts: &StackOpts) -> Result<()> {
         remote = target_remote,
     );
 
+    warn_if_no_auto_delete(&target_repo);
+
     // If a previous push went to the wrong remote, offer to rescue it.
     rescue_wrong_remote(&state, &target_remote, opts.yes)?;
 
@@ -121,6 +123,26 @@ pub fn run(opts: &StackOpts) -> Result<()> {
         println!("{out}");
     }
     Ok(())
+}
+
+// --- repo-setting warnings --------------------------------------------------
+
+/// Warn when the merge target lacks `delete_branch_on_merge`. Without it,
+/// GitHub does not retarget dependent stack PRs after the parent merges,
+/// so the stack effectively breaks at the first merge. The check happens
+/// every run rather than once because settings change behind our back.
+fn warn_if_no_auto_delete(target: &RepoInfo) {
+    if target.delete_branch_on_merge {
+        return;
+    }
+    eprintln!(
+        "⚠  `delete_branch_on_merge` is OFF on {repo}. After this PR merges, \
+         GitHub will not delete the head branch and the next stack PR will not \
+         auto-retarget to `{default}`. Enable with:\n     \
+         gh api -X PATCH /repos/{repo} -f delete_branch_on_merge=true",
+        repo = target.name_with_owner,
+        default = target.default_branch,
+    );
 }
 
 // --- state guards -----------------------------------------------------------
