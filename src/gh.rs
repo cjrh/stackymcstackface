@@ -208,6 +208,29 @@ pub fn create_pr(repo: &str, base: &str, head: &str, opts: &CreatePrOpts<'_>) ->
     run_capture(&arg_refs)
 }
 
+/// Fetch the markdown body of an existing PR. `pr` may be a URL, number, or
+/// branch -- whatever `gh pr view` accepts.
+///
+/// `--json` fields used:
+/// - `body` -- markdown body of the PR (may be empty or null)
+pub fn pr_body(pr: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Raw {
+        body: Option<String>,
+    }
+    let stdout = run_capture(&["pr", "view", pr, "--json", "body"])?;
+    let raw: Raw = serde_json::from_str(&stdout)
+        .with_context(|| format!("could not parse `gh pr view` output: {stdout}"))?;
+    Ok(raw.body.unwrap_or_default())
+}
+
+/// Replace the body of an existing PR. `pr` accepts the same identifiers as
+/// `pr_body`.
+pub fn set_pr_body(pr: &str, body: &str) -> Result<()> {
+    run_capture(&["pr", "edit", pr, "--body", body])?;
+    Ok(())
+}
+
 // --- internals --------------------------------------------------------------
 
 fn run_capture(args: &[&str]) -> Result<String> {
