@@ -6,7 +6,11 @@ current branch to the right remote and opens the PR with the right base.
 
 ## Demo
 
-You are on a new branch built on top of an existing open PR. One command:
+You've already created a PR for the current branch.
+Now you create a new branch off it for some follow-up work.
+You commit the changes, but have not pushed yet.
+
+Run this:
 
 ```text
 $ stackymcstackface stack
@@ -16,6 +20,9 @@ $ stackymcstackface stack
 → creating PR: head=`feat/parser-tests` base=`feat/parser-cleanup` ...
 https://github.com/octocat/widgets/pull/422
 ```
+
+A new PR will be created, stacked correctly on top of the previous
+PR.
 
 The new PR's base is the parent branch (not `main`), so GitHub treats it
 as stacked. When #421 later merges, GitHub auto-retargets #422 to `main`,
@@ -27,15 +34,17 @@ you will be stuck wondering why nothing moved.
 
 For the auto-retarget to work end to end:
 
-1. **`delete_branch_on_merge` must be enabled.** Run once per repo:
+1. GitHub setting **`delete_branch_on_merge` must be enabled.** Run once per repo:
 
    ```sh
    gh api -X PATCH /repos/<owner>/<repo> -f delete_branch_on_merge=true
    ```
 
-2. **Merges must be merge commits or rebases, not squashes.** Squashing
-   replaces the merged commits with a new one and the next PR ends up
-   conflicting against it.
+2. **Use merge commits or rebase merges, not squashes.** GitHub retargets
+   dependents for all three merge methods, but squash creates a new
+   commit on `main` whose content overlaps the original commits still
+   living in the next PR's branch, so the retargeted PR comes back with
+   conflicts you have to rebase out. See [Repo setup](#repo-setup-one-time).
 
 `stackymcstackface` prints a warning at the top of every run if (1) is
 off, so you find out before merging rather than after. (2) is per-merge
@@ -133,13 +142,29 @@ of the workflow that GitHub handles will not work cleanly.
    "Automatically delete head branches".
 
 2. **Use merge commits or rebase merges, not squash, for stack PRs.**
-   Squashing replaces the merged branch's commits with one new commit
-   on `main`, so the next stack PR's parent SHA is no longer in
-   `main`'s history. The auto-retargeted PR then conflicts against the
-   squash commit and you have to rebase. Merge commits and rebase
-   merges keep the original commits on `main` and stack cleanly. Pick
-   per-merge in the GitHub UI, or restrict the repo defaults under
-   Settings → General → Pull Requests.
+   GitHub auto-retargets dependent PRs the same way for all three
+   merge methods — squash does not break the retarget itself. The
+   problem is what lands on `main`: squash collapses the parent
+   branch's commits into one new commit whose content is the same diff
+   that the next PR's branch *also* still contains as its original,
+   un-squashed commits. After retarget, the next PR's diff against
+   `main` re-litigates those changes against the squash commit, so
+   already-reviewed hunks come back as merge conflicts and you have to
+   rebase to clear them. Merge commits and rebase merges leave the
+   original commits intact on `main`, so the dependent branch lines up
+   cleanly with no rework. Pick per-merge in the GitHub UI, or
+   restrict the repo defaults under Settings → General → Pull Requests.
+
+3. Optional but recommended: set `git config stack.remote upstream` to
+   disambiguate the merge-target remote name. The tool can usually figure
+   it out by matching URLs, but this makes it explicit and avoids the
+   fallback logic that otherwise tries to pick between multiple remotes.
+
+4. Optional but recommended: In your GitHub settings, set "Allow merge commits"
+   and for the "Default commit message" choose "Pull request title and description". 
+   This way the merge commit gets a useful message by default, and you
+   don't have to edit it every time, and using `git log --first-parent` on `main` 
+   still shows the PR titles.
 
 ### Suggested alias
 
@@ -357,6 +382,26 @@ These are explicitly out of scope and unlikely to ever be added:
 - Auto-merging, auto-rebasing, conflict resolution, or any other workflow
   orchestration.
 - A local stack-state file of any kind. See "Design requirements".
+
+## Further reading
+
+Background on the GitHub mechanics this tool relies on:
+
+- [Pull request retargeting](https://github.blog/changelog/2020-05-19-pull-request-retargeting/)
+  — GitHub's 2020 changelog announcing the auto-retarget behaviour
+  that makes stacking work after a merge. Triggers on
+  *merged + deleted*, regardless of merge method.
+- [About pull request merges](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/about-pull-request-merges)
+  — official docs on merge commits, squash, and rebase, including the
+  separate "indirect merge" feature (which *is* merge-method-specific
+  and is what most "squash breaks stacks" claims actually conflate).
+- [My workflow for stacked PRs on GitHub](https://www.davepacheco.net/blog/2025/stacked-prs-on-github/)
+  — Dave Pacheco walks through stacked-PR mechanics end to end and
+  explains, with worked examples, why squash merges produce spurious
+  conflicts in the next PR even though retargeting itself succeeds.
+- [Stacked pull requests with squash merge](https://echobind.com/post/stacked-pull-requests-with-squash-merge)
+  — a complementary take on the same squash-vs-stacks problem and how
+  to recover when you can't avoid squash.
 
 ## License
 
