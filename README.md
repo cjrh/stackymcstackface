@@ -166,6 +166,22 @@ of the workflow that GitHub handles will not work cleanly.
    don't have to edit it every time, and using `git log --first-parent` on `main` 
    still shows the PR titles.
 
+If you have admin access to the repo, settings (1) and (4) can be applied
+in a single PATCH:
+
+```sh
+gh api -X PATCH /repos/<owner>/<repo> \
+  -F delete_branch_on_merge=true \
+  -F allow_merge_commit=true \
+  -f merge_commit_title=PR_TITLE \
+  -f merge_commit_message=PR_BODY
+```
+
+`-F` sends typed values (booleans here); `-f` sends strings. If `gh`
+returns 403, you don't have admin permission on the repo — ask whoever
+does, or apply the settings through Settings → General → Pull Requests
+in the web UI.
+
 ### Suggested alias
 
 The binary name is intentionally absurd. Pick a short alias for daily use.
