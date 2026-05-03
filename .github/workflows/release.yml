@@ -29,6 +29,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          # taiki-e/upload-rust-binary-action invokes `cross` automatically
+          # for foreign Linux targets — no extra setup needed.
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
           - target: x86_64-apple-darwin
