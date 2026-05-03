@@ -19,10 +19,13 @@ $ stackymcstackface stack
 → pushing `feat/parser-tests` to `origin` ...
 → creating PR: head=`feat/parser-tests` base=`feat/parser-cleanup` ...
 https://github.com/octocat/widgets/pull/422
+→ noted parent #421 in PR description
 ```
 
 A new PR will be created, stacked correctly on top of the previous
-PR.
+PR. The new PR's body picks up a `Stacked on #421` footer (separated
+from whatever `--fill` or `--body` produced by a `---` rule), so
+reviewers see the parent without leaving the PR page.
 
 The new PR's base is the parent branch (not `main`), so GitHub treats it
 as stacked. When #421 later merges, GitHub auto-retargets #422 to `main`,
@@ -249,6 +252,7 @@ sms stack
 → pushing `feat/parser-cleanup-tests` to `origin` ...
 → creating PR: head=`feat/parser-cleanup-tests` base=`feat/parser-cleanup` ...
 https://github.com/octocat/widgets/pull/422
+→ noted parent #421 in PR description
 ```
 
 The parent is found by walking your branch's ancestry and picking the
@@ -385,6 +389,10 @@ sms stack [OPTIONS]
    No ancestor means the base is the default branch.
 7. Push the current branch to the merge-target remote with `--set-upstream`.
 8. `gh pr create --base <parent> --head <branch> --repo <merge-target>`.
+9. If the new PR is stacked on an existing PR, append a `Stacked on
+   #<parent>` footer to its body via `gh pr edit`, separated by a
+   `---` rule. Skipped under `--web` (the body is finalised in the
+   browser there).
 
 You can read the same algorithm directly in
 [`src/stack.rs`](src/stack.rs).

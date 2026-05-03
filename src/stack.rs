@@ -122,6 +122,22 @@ pub fn run(opts: &StackOpts) -> Result<()> {
     if !out.is_empty() {
         println!("{out}");
     }
+
+    // For stacked PRs, point the new PR's body at the parent. `--web` skips
+    // create-from-CLI, so there's no URL to edit yet; let the user handle the
+    // body in the browser in that case.
+    if !opts.web
+        && let Parent::Pr {
+            number: parent_number,
+            branch: parent_branch,
+            ..
+        } = &parent
+    {
+        let pr_url = out.trim();
+        if pr_url.starts_with("https://") {
+            append_stack_footer(pr_url, *parent_number, parent_branch);
+        }
+    }
     Ok(())
 }
 
@@ -393,6 +409,38 @@ fn closer(a: Parent, b: Parent) -> Parent {
     if dist(&b) < dist(&a) { b } else { a }
 }
 
+// --- stack footer -----------------------------------------------------------
+
+/// Append a "Stacked on #N" footer to a freshly-created stacked PR's body,
+/// separated from whatever `--fill` (or the user) put there by a `---`
+/// horizontal rule. Failures are non-fatal: the PR is already created with
+/// the correct base, so the worst case is a missing footer.
+fn append_stack_footer(pr_url: &str, parent_number: u64, parent_branch: &str) {
+    let footer = format!("Stacked on #{parent_number} (`{parent_branch}`).");
+    let result = (|| -> Result<()> {
+        let current = gh::pr_body(pr_url)?;
+        gh::set_pr_body(pr_url, &merge_body_with_footer(&current, &footer))
+    })();
+    match result {
+        Ok(()) => println!("→ noted parent #{parent_number} in PR description"),
+        Err(e) => eprintln!("⚠  could not update PR description: {e:#}"),
+    }
+}
+
+/// Combine an existing PR body with a new footer. Trims trailing whitespace
+/// from the body so the `---` separator lands on its own line, and skips the
+/// separator entirely when the body is empty.
+fn merge_body_with_footer(current: &str, footer: &str) -> String {
+    let trimmed = current.trim_end();
+    if trimmed.is_empty() {
+        footer.to_string()
+    } else {
+        format!("{trimmed}\n\n---\n\n{footer}")
+    }
+}
+
+// --- plan printing ----------------------------------------------------------
+
 fn print_plan(parent: &Parent, existing: Option<&OpenPr>, branch: &str) {
     match (existing, parent) {
         (Some(pr), _) => {
@@ -450,5 +498,32 @@ mod tests {
     fn url_match_negative() {
         assert!(!url_points_at("https://github.com/other/repo", "foo/bar"));
         assert!(!url_points_at("", "foo/bar"));
+    }
+
+    #[test]
+    fn footer_appends_with_separator() {
+        let merged = merge_body_with_footer("Some PR body.", "Stacked on #5.");
+        assert_eq!(merged, "Some PR body.\n\n---\n\nStacked on #5.");
+    }
+
+    #[test]
+    fn footer_trims_trailing_whitespace_before_separator() {
+        let merged = merge_body_with_footer("Body with trailing newline.\n\n", "Stacked on #5.");
+        assert_eq!(
+            merged,
+            "Body with trailing newline.\n\n---\n\nStacked on #5."
+        );
+    }
+
+    #[test]
+    fn footer_replaces_empty_body() {
+        assert_eq!(
+            merge_body_with_footer("", "Stacked on #5."),
+            "Stacked on #5."
+        );
+        assert_eq!(
+            merge_body_with_footer("   \n\n", "Stacked on #5."),
+            "Stacked on #5."
+        );
     }
 }
