@@ -21,6 +21,11 @@ pub struct RepoInfo {
     pub is_fork: bool,
     /// `owner/name` of the parent when `is_fork` is true.
     pub parent_name_with_owner: Option<String>,
+    /// True if "Automatically delete head branches" is enabled on the repo.
+    /// When false, dependent stack PRs do not auto-retarget after the
+    /// parent merges, because GitHub only retargets when the head branch
+    /// is deleted through the merge flow.
+    pub delete_branch_on_merge: bool,
 }
 
 /// One open pull request, as far as `stack` cares.
@@ -40,10 +45,11 @@ pub struct OpenPr {
 ///
 /// `--json` fields used (run `gh repo view --json '' 2>&1` to see the full
 /// list `gh` accepts):
-/// - `nameWithOwner`     — `owner/name`, the canonical id used everywhere
-/// - `defaultBranchRef`  — has a `name` field; the repo's default branch
-/// - `isFork`            — true when this repo was forked from another
-/// - `parent`            — only populated when `isFork`; has `nameWithOwner`
+/// - `nameWithOwner`        — `owner/name`, the canonical id used everywhere
+/// - `defaultBranchRef`     — has a `name` field; the repo's default branch
+/// - `isFork`               — true when this repo was forked from another
+/// - `parent`               — only populated when `isFork`; has `nameWithOwner`
+/// - `deleteBranchOnMerge`  — controls whether stacked-PR auto-retargeting works
 pub fn repo_info(name_with_owner: Option<&str>) -> Result<RepoInfo> {
     #[derive(Deserialize)]
     struct Raw {
@@ -54,6 +60,8 @@ pub fn repo_info(name_with_owner: Option<&str>) -> Result<RepoInfo> {
         #[serde(rename = "isFork")]
         is_fork: bool,
         parent: Option<ParentRef>,
+        #[serde(rename = "deleteBranchOnMerge")]
+        delete_branch_on_merge: bool,
     }
     #[derive(Deserialize)]
     struct DefaultBranchRef {
@@ -69,7 +77,7 @@ pub fn repo_info(name_with_owner: Option<&str>) -> Result<RepoInfo> {
         "repo",
         "view",
         "--json",
-        "nameWithOwner,defaultBranchRef,isFork,parent",
+        "nameWithOwner,defaultBranchRef,isFork,parent,deleteBranchOnMerge",
     ];
     if let Some(target) = name_with_owner {
         args.insert(2, target);
@@ -82,6 +90,7 @@ pub fn repo_info(name_with_owner: Option<&str>) -> Result<RepoInfo> {
         default_branch: raw.default_branch_ref.name,
         is_fork: raw.is_fork,
         parent_name_with_owner: raw.parent.map(|p| p.name_with_owner),
+        delete_branch_on_merge: raw.delete_branch_on_merge,
     })
 }
 

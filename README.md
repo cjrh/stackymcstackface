@@ -17,8 +17,33 @@ $ stackymcstackface stack
 https://github.com/octocat/widgets/pull/422
 ```
 
-The new PR's base is the parent branch (not `main`), so GitHub treats it as
-stacked. When #421 merges, GitHub retargets #422 to `main` automatically.
+The new PR's base is the parent branch (not `main`), so GitHub treats it
+as stacked. When #421 later merges, GitHub auto-retargets #422 to `main`,
+**but only if the merge-target repo has the right settings**. Without
+them, #422's base will keep pointing at the now-merged parent branch and
+you will be stuck wondering why nothing moved.
+
+### Required repo settings
+
+For the auto-retarget to work end to end:
+
+1. **`delete_branch_on_merge` must be enabled.** Run once per repo:
+
+   ```sh
+   gh api -X PATCH /repos/<owner>/<repo> -f delete_branch_on_merge=true
+   ```
+
+2. **Merges must be merge commits or rebases, not squashes.** Squashing
+   replaces the merged commits with a new one and the next PR ends up
+   conflicting against it.
+
+`stackymcstackface` prints a warning at the top of every run if (1) is
+off, so you find out before merging rather than after. (2) is per-merge
+and not detectable from the CLI; pick the right button in the GitHub UI
+or restrict the repo defaults under Settings → General → Pull Requests.
+
+See [Repo setup](#repo-setup-one-time) and [Merging a stack](#8-merging-a-stack)
+for the details.
 
 ## Goals
 
