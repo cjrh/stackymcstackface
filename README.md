@@ -2,10 +2,12 @@
 
 A drop-in replacement for `git push` that also opens a pull request the
 first time you push a branch — and stacks the PR correctly when your
-branch descends from another open PR. Driven by the official
-[`gh`](https://cli.github.com/) CLI. One subcommand: `push`.
+branch descends from another open PR. Uses the official
+[`gh`](https://cli.github.com/) CLI (must be installed).
 
-`sms push` figures out which of three things you meant:
+One subcommand: `push`.
+
+`stackymcstackface push` figures out which of three things you meant:
 
 1. **Branch already has an open PR** — just push the new commits.
 2. **New branch on top of an open PR** — push and open a stacked PR
@@ -13,37 +15,80 @@ branch descends from another open PR. Driven by the official
 3. **New branch off the default branch** — push and open a regular PR.
 
 The first case is the boring one, and that's the point: replace `git push`
-with `sms push` in your muscle memory and you never have to think about
+with `stackymcstackface push` in your muscle memory and you never have to think about
 which case applies.
+
+You can make a shell alias to `sms` or whatever you like for daily use. See [Install](#install).
 
 ## Demo
 
-You've already created a PR for the current branch.
-Now you create a new branch off it for some follow-up work.
-You commit the changes, but have not pushed yet.
+The same command in three situations:
 
-Run this:
+**1. First push of a new branch:**
 
+```sh
+git checkout -b feat/parser
+# ...commit...
+sms push
+```
+
+Output:
 ```text
-$ stackymcstackface push
-→ plan: push `feat/parser-tests` and open a STACKED PR on top of #421
-        (base `feat/parser-cleanup`)
+→ plan: push `feat/parser` and open a PR with base `main`
+→ pushing `feat/parser` to `origin` ...
+→ creating PR: head=`feat/parser` base=`main` repo=octocat/widgets
+https://github.com/octocat/widgets/pull/421
+```
+
+Pushed, PR opened.
+
+*If your local clone is a fork of the merge target, `sms push` sends the branch to the **parent** repo (e.g. `upstream`), not your fork — handled automatically. See [Caveats](#caveats).*
+
+**2. First push of a branch off that one:**
+
+```sh
+git checkout -b feat/parser-tests   # off feat/parser
+# ...commit...
+sms push
+```
+
+Output:
+```text
+→ plan: push `feat/parser-tests` and open a STACKED PR on top of #421 (base `feat/parser`)
+        parent: https://github.com/octocat/widgets/pull/421
 → pushing `feat/parser-tests` to `origin` ...
-→ creating PR: head=`feat/parser-tests` base=`feat/parser-cleanup` ...
+→ creating PR: head=`feat/parser-tests` base=`feat/parser` repo=octocat/widgets
 https://github.com/octocat/widgets/pull/422
 → noted parent #421 in PR description
 ```
 
-A new PR will be created, stacked correctly on top of the previous
-PR. The new PR's body picks up a `Stacked on #421` footer (separated
-from whatever `--fill` or `--body` produced by a `---` rule), so
-reviewers see the parent without leaving the PR page.
+Pushed, *stacked* PR opened — base is `feat/parser` (not `main`), and a `Stacked on #421` line is appended to the PR body.
 
-The new PR's base is the parent branch (not `main`), so GitHub treats it
-as stacked. When #421 later merges, GitHub auto-retargets #422 to `main`,
-**but only if the merge-target repo has the right settings**. Without
-them, #422's base will keep pointing at the now-merged parent branch and
-you will be stuck wondering why nothing moved.
+**3. Any later push to either branch:**
+
+```sh
+# ...more commits...
+sms push
+```
+
+```text
+→ plan: push updates to `feat/parser-tests` (PR #422: https://github.com/octocat/widgets/pull/422)
+→ pushing `feat/parser-tests` to `origin` ...
+✔ PR already exists: #422 https://github.com/octocat/widgets/pull/422
+  (base on GitHub: `feat/parser`)
+```
+
+Just pushes. No prompts, no PR mutations.
+
+### Caveats
+
+**Stacking requires push access to the merge-target repo.** GitHub treats a PR as stacked only when its head and base branches both live on the *same* repository. Your stack branches therefore have to be pushable to the repo you're merging into. Three setups:
+
+1. WORKS: **Direct clone of the merge target**: `origin` is the merge target; stacking works. This is the most common setup.
+2. WORKS: **Fork of the merge target, *with* push access to the parent.** `sms push` automatically detects the fork, finds the parent's remote (typically `upstream`), and pushes your branches there instead of to your fork. Stacking works. For example, an internal fork of an employer repo where the team uses the OSS-style PR-from-fork flow but contributors retain push access to the parent. In this case you would no longer use your fork with `sms push`.
+3. DOES NOT WORK: **Fork of the merge target, *without* push access to the parent.** This is the standard open-source contributor flow: fork the project, push topic branches to your fork, open PRs from `you/proj` against `upstream/proj`. Single PRs work fine; **stacking does not, and cannot.** GitHub does not support cross-repo stacked PRs, so no tool, `stackymcstackface` included, can make this work. `sms push` will surface it as a `git push` permission error against the parent remote.
+
+If you're in bucket (3) and want a stack, the only options are out-of-band: get push access to the parent, or land your "stack" as independent, single-parent PRs in dependency order.
 
 ### Required repo settings
 
