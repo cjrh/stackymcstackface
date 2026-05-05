@@ -190,7 +190,7 @@ fn guard_state(state: &RepoState) -> Result<String> {
 // --- merge target resolution ------------------------------------------------
 
 /// Decide which GitHub repo PRs should land on. For forks, that's the parent.
-fn resolve_merge_target(local: &RepoInfo) -> Result<RepoInfo> {
+pub(crate) fn resolve_merge_target(local: &RepoInfo) -> Result<RepoInfo> {
     if !local.is_fork {
         return Ok(local.clone());
     }
@@ -204,7 +204,7 @@ fn resolve_merge_target(local: &RepoInfo) -> Result<RepoInfo> {
 
 /// Find the *local* git remote whose URL points at `target`. Honours the
 /// `stack.remote` git config override; otherwise picks by URL match.
-fn resolve_merge_target_remote(target: &RepoInfo) -> Result<String> {
+pub(crate) fn resolve_merge_target_remote(target: &RepoInfo) -> Result<String> {
     if let Some(name) = git::config_get("stack.remote")? {
         return Ok(name);
     }
