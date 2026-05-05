@@ -1,4 +1,4 @@
-//! The `stack` command: push the current branch to the merge-target remote
+//! The `push` command: push the current branch to the merge-target remote
 //! and open a PR whose base is either the default branch (regular PR) or the
 //! closest ancestor branch with an open PR (stacked PR).
 //!
@@ -21,7 +21,7 @@ use dialoguer::Confirm;
 use crate::gh::{self, CreatePrOpts, OpenPr, RepoInfo};
 use crate::git::{self, RepoState};
 
-/// User-facing options for `stack`. Kept tiny on purpose; the goal is to
+/// User-facing options for `push`. Kept tiny on purpose; the goal is to
 /// match the manual workflow, not to grow flags.
 // Each bool is an independent CLI flag; collapsing them into a state-machine
 // enum (clippy's suggestion) would obscure the clap mapping without simplifying
@@ -168,7 +168,7 @@ fn warn_if_no_auto_delete(target: &RepoInfo) {
 fn guard_state(state: &RepoState) -> Result<String> {
     if let Some(op) = state.in_progress {
         bail!(
-            "refusing to stack: a {} is in progress. Resolve it first \
+            "refusing to push: a {} is in progress. Resolve it first \
              (`git {}`) and try again.",
             op.label(),
             match op {
@@ -184,7 +184,7 @@ fn guard_state(state: &RepoState) -> Result<String> {
     state
         .current_branch
         .clone()
-        .ok_or_else(|| anyhow!("HEAD is detached; check out a branch before stacking"))
+        .ok_or_else(|| anyhow!("HEAD is detached; check out a branch before pushing"))
 }
 
 // --- merge target resolution ------------------------------------------------
@@ -445,7 +445,7 @@ fn print_plan(parent: &Parent, existing: Option<&OpenPr>, branch: &str) {
     match (existing, parent) {
         (Some(pr), _) => {
             println!(
-                "→ plan: push `{branch}` (PR #{n} already open: {url})",
+                "→ plan: push updates to `{branch}` (PR #{n}: {url})",
                 n = pr.number,
                 url = pr.url
             );

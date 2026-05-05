@@ -1,4 +1,4 @@
-//! `stack` -- automate stacked PR creation on GitHub.
+//! `push` -- a drop-in replacement for `git push` that opens (stacked) PRs.
 //!
 //! See `stack.rs` for the orchestration logic. This file just defines the CLI
 //! and dispatches to it.
@@ -14,13 +14,15 @@ mod stack;
 #[derive(Parser, Debug)]
 #[command(
     name = "stackymcstackface",
-    about = "Push the current branch and open a (stacked) PR on GitHub.",
-    long_about = "Pushes the current branch to the merge-target remote (the repo \
-                  where the PR is created), then opens a PR. If the branch \
-                  descends from another open PR's head, the new PR is stacked \
-                  on top of it; otherwise it targets the default branch.\n\n\
-                  No local stack state is kept: every invocation reconstructs \
-                  the picture from `git` and `gh`.",
+    about = "Drop-in replacement for `git push` that opens a (stacked) PR on first push.",
+    long_about = "A drop-in replacement for `git push`. Three cases, picked \
+                  automatically:\n\n  \
+                  * branch already has an open PR -- just pushes the new commits\n  \
+                  * new branch off an open PR     -- pushes and opens a stacked PR\n  \
+                  * new branch off the default    -- pushes and opens a regular PR\n\n\
+                  The push goes to the merge-target remote (the repo where the \
+                  PR is created). No local stack state is kept: every invocation \
+                  reconstructs the picture from `git` and `gh`.",
     version
 )]
 struct Cli {
@@ -30,13 +32,13 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Push the current branch and open a (stacked) PR.
-    Stack(StackArgs),
+    /// Push the current branch (drop-in `git push`); opens a (stacked) PR on first push.
+    Push(PushArgs),
 }
 
 #[allow(clippy::struct_excessive_bools)] // each bool is its own clap flag
 #[derive(clap::Args, Debug)]
-struct StackArgs {
+struct PushArgs {
     /// PR title. If omitted, `gh pr create --fill` populates from commits.
     #[arg(short = 't', long)]
     title: Option<String>,
@@ -62,8 +64,8 @@ struct StackArgs {
     yes: bool,
 }
 
-impl From<StackArgs> for stack::StackOpts {
-    fn from(a: StackArgs) -> Self {
+impl From<PushArgs> for stack::StackOpts {
+    fn from(a: PushArgs) -> Self {
         Self {
             title: a.title,
             body: a.body,
@@ -78,7 +80,7 @@ impl From<StackArgs> for stack::StackOpts {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Cmd::Stack(args) => stack::run(&args.into()),
+        Cmd::Push(args) => stack::run(&args.into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
