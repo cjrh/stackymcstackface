@@ -1,7 +1,7 @@
 # stackymcstackface
 
 A drop-in replacement for `git push` that also opens a pull request the
-first time you push a branch — and stacks the PR correctly when your
+first time you push a branch, and stacks the PR correctly when your
 branch descends from another open PR. Uses the official
 [`gh`](https://cli.github.com/) CLI (must be installed).
 
@@ -9,16 +9,17 @@ One subcommand: `push`.
 
 `stackymcstackface push` figures out which of three things you meant:
 
-1. **Branch already has an open PR** — just push the new commits.
-2. **New branch on top of an open PR** — push and open a stacked PR
+1. **Branch already has an open PR**: just push the new commits.
+2. **New branch on top of an open PR**: push and open a stacked PR
    with the parent branch as its base.
-3. **New branch off the default branch** — push and open a regular PR.
+3. **New branch off the default branch**: push and open a regular PR.
 
 The first case is the boring one, and that's the point: replace `git push`
 with `stackymcstackface push` in your muscle memory and you never have to think about
 which case applies.
 
-You can make a shell alias to `sms` or whatever you like for daily use. See [Install](#install).
+You can make a shell alias like `alias sms=stackymcstackface` or whatever
+you like for daily use. See [Install](#install).
 
 ## Demo
 
@@ -42,7 +43,7 @@ https://github.com/octocat/widgets/pull/421
 
 Pushed, PR opened.
 
-*If your local clone is a fork of the merge target, `sms push` sends the branch to the **parent** repo (e.g. `upstream`), not your fork — handled automatically. See [Caveats](#caveats).*
+*If your local clone is a fork of the merge target, `sms push` sends the branch to the **parent** repo (e.g. `upstream`), not your fork; this is handled automatically. See [Caveats](#caveats).*
 
 **2. First push of a branch off that one:**
 
@@ -62,7 +63,7 @@ https://github.com/octocat/widgets/pull/422
 → noted parent #421 in PR description
 ```
 
-Pushed, *stacked* PR opened — base is `feat/parser` (not `main`), and a `Stacked on #421` line is appended to the PR body.
+Pushed, *stacked* PR opened: base is `feat/parser` (not `main`), and a `Stacked on #421` line is appended to the PR body.
 
 **3. Any later push to either branch:**
 
@@ -203,7 +204,7 @@ of the workflow that GitHub handles will not work cleanly.
 
 2. **Use merge commits or rebase merges, not squash, for stack PRs.**
    GitHub auto-retargets dependent PRs the same way for all three
-   merge methods — squash does not break the retarget itself. The
+   merge methods; squash does not break the retarget itself. The
    problem is what lands on `main`: squash collapses the parent
    branch's commits into one new commit whose content is the same diff
    that the next PR's branch *also* still contains as its original,
@@ -238,7 +239,7 @@ gh api -X PATCH /repos/<owner>/<repo> \
 ```
 
 `-F` sends typed values (booleans here); `-f` sends strings. If `gh`
-returns 403, you don't have admin permission on the repo — ask whoever
+returns 403, you don't have admin permission on the repo; ask whoever
 does, or apply the settings through Settings → General → Pull Requests
 in the web UI.
 
@@ -375,8 +376,8 @@ and prints the existing PR URL. It will not try to recreate it.
 
 Once a branch has an open PR on the merge target, `sms push` is just
 `git push`: it pushes any new commits to the existing remote branch and
-reports the existing PR. No prompts, no PR mutations, no extra work —
-this is what makes `sms push` safe to use as a blanket replacement for
+reports the existing PR. No prompts, no PR mutations, no extra work.
+This is what makes `sms push` safe to use as a blanket replacement for
 `git push`.
 
 ```text
