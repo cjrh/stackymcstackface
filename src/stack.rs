@@ -168,7 +168,7 @@ fn warn_if_no_auto_delete(target: &RepoInfo) {
 fn guard_state(state: &RepoState) -> Result<String> {
     if let Some(op) = state.in_progress {
         bail!(
-            "refusing to stack: a {} is in progress. Resolve it first \
+            "refusing to push: a {} is in progress. Resolve it first \
              (`git {}`) and try again.",
             op.label(),
             match op {
@@ -184,7 +184,7 @@ fn guard_state(state: &RepoState) -> Result<String> {
     state
         .current_branch
         .clone()
-        .ok_or_else(|| anyhow!("HEAD is detached; check out a branch before stacking"))
+        .ok_or_else(|| anyhow!("HEAD is detached; check out a branch before pushing"))
 }
 
 // --- merge target resolution ------------------------------------------------
