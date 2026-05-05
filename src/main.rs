@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod doctor;
 mod gh;
 mod git;
 mod stack;
@@ -34,6 +35,8 @@ struct Cli {
 enum Cmd {
     /// Push the current branch (drop-in `git push`); opens a (stacked) PR on first push.
     Push(PushArgs),
+    /// Diagnose whether the environment is set up for `push` (read-only).
+    Doctor,
 }
 
 #[allow(clippy::struct_excessive_bools)] // each bool is its own clap flag
@@ -79,14 +82,14 @@ impl From<PushArgs> for stack::StackOpts {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let result = match cli.command {
-        Cmd::Push(args) => stack::run(&args.into()),
-    };
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e:#}");
-            ExitCode::from(1)
-        }
+    match cli.command {
+        Cmd::Push(args) => match stack::run(&args.into()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::from(1)
+            }
+        },
+        Cmd::Doctor => doctor::run(),
     }
 }

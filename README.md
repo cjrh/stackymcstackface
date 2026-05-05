@@ -257,6 +257,17 @@ alias --save sms='stackymcstackface'
 
 From here on the examples use `sms`.
 
+### Verifying setup
+
+`sms doctor` runs a read-only check of the prerequisites for `push`:
+`git` and `gh` are on `PATH`, `gh` is authenticated, the working
+directory is a git clone of a GitHub repo, the merge-target remote is
+unambiguous, `delete_branch_on_merge` is enabled, and the current branch
+is in a state `push` would accept. Output is colour-coded
+(`✔` / `⚠` / `✗`); the command exits non-zero if any check failed.
+Honours `NO_COLOR` and disables colour automatically when stdout is not
+a terminal. It never fetches, pushes, or mutates anything on GitHub.
+
 ## Configuration
 
 Optional. By default the tool picks the merge-target remote automatically:
