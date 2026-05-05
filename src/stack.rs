@@ -1,4 +1,4 @@
-//! The `stack` command: push the current branch to the merge-target remote
+//! The `push` command: push the current branch to the merge-target remote
 //! and open a PR whose base is either the default branch (regular PR) or the
 //! closest ancestor branch with an open PR (stacked PR).
 //!
@@ -21,7 +21,7 @@ use dialoguer::Confirm;
 use crate::gh::{self, CreatePrOpts, OpenPr, RepoInfo};
 use crate::git::{self, RepoState};
 
-/// User-facing options for `stack`. Kept tiny on purpose; the goal is to
+/// User-facing options for `push`. Kept tiny on purpose; the goal is to
 /// match the manual workflow, not to grow flags.
 // Each bool is an independent CLI flag; collapsing them into a state-machine
 // enum (clippy's suggestion) would obscure the clap mapping without simplifying
@@ -445,7 +445,7 @@ fn print_plan(parent: &Parent, existing: Option<&OpenPr>, branch: &str) {
     match (existing, parent) {
         (Some(pr), _) => {
             println!(
-                "→ plan: push `{branch}` (PR #{n} already open: {url})",
+                "→ plan: push updates to `{branch}` (PR #{n}: {url})",
                 n = pr.number,
                 url = pr.url
             );

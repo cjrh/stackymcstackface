@@ -1,8 +1,20 @@
 # stackymcstackface
 
-A small helper for stacked pull requests on GitHub, driven by the official
-[`gh`](https://cli.github.com/) CLI. One subcommand: `stack`. It pushes your
-current branch to the right remote and opens the PR with the right base.
+A drop-in replacement for `git push` that also opens a pull request the
+first time you push a branch — and stacks the PR correctly when your
+branch descends from another open PR. Driven by the official
+[`gh`](https://cli.github.com/) CLI. One subcommand: `push`.
+
+`sms push` figures out which of three things you meant:
+
+1. **Branch already has an open PR** — just push the new commits.
+2. **New branch on top of an open PR** — push and open a stacked PR
+   with the parent branch as its base.
+3. **New branch off the default branch** — push and open a regular PR.
+
+The first case is the boring one, and that's the point: replace `git push`
+with `sms push` in your muscle memory and you never have to think about
+which case applies.
 
 ## Demo
 
@@ -13,7 +25,7 @@ You commit the changes, but have not pushed yet.
 Run this:
 
 ```text
-$ stackymcstackface stack
+$ stackymcstackface push
 → plan: push `feat/parser-tests` and open a STACKED PR on top of #421
         (base `feat/parser-cleanup`)
 → pushing `feat/parser-tests` to `origin` ...
@@ -88,7 +100,7 @@ this tool is probably not for you.
   describing the stack and its state. That file rots. Once it disagrees
   with reality on GitHub (which happens *most* once you have five or six
   PRs in a stack), the tooling becomes harder to fix than the manual
-  workflow it replaced. Every invocation of `stack` reconstructs the
+  workflow it replaced. Every invocation of `push` reconstructs the
   picture from authoritative sources only: `git fetch`,
   `git merge-base --is-ancestor`, and `gh pr list`. Nothing to keep in
   sync because there is nothing to sync.
@@ -110,7 +122,7 @@ this tool is probably not for you.
   those.
 
 - **Refuse to act on a dirty repo state.** If the repo is mid-rebase,
-  mid-merge, mid-cherry-pick, mid-revert, mid-bisect, or mid-`am`, `stack`
+  mid-merge, mid-cherry-pick, mid-revert, mid-bisect, or mid-`am`, `push`
   bails and tells you what it found. **Uncommitted changes are fine.** A
   common workflow is to peel one PR at a time off a large set of local
   changes.
@@ -222,7 +234,7 @@ everywhere.
 ```sh
 git checkout -b feat/parser-cleanup
 # ... edit, commit ...
-sms stack
+sms push
 ```
 
 ```text
@@ -240,7 +252,7 @@ https://github.com/octocat/widgets/pull/421
 # while still on feat/parser-cleanup, with PR #421 open:
 git checkout -b feat/parser-cleanup-tests
 # ... edit, commit ...
-sms stack
+sms push
 ```
 
 ```text
@@ -268,7 +280,7 @@ origin    git@github.com:you/widgets.git       (fetch / push)
 upstream  git@github.com:octocat/widgets.git   (fetch / push)
 ```
 
-`sms stack` will detect the fork, identify `upstream` as the merge-target
+`sms push` will detect the fork, identify `upstream` as the merge-target
 remote, and push your branches there, *not* to your fork's `origin`. That
 is the only configuration that lets stacking work in a fork: both PR head
 and base must live on the same repo.
@@ -278,7 +290,7 @@ and base must live on the same repo.
 You forgot and ran `git push -u origin my-branch` first. Then:
 
 ```sh
-sms stack
+sms push
 ```
 
 ```text
@@ -294,19 +306,22 @@ Answer yes and the tool re-pushes to `upstream` with `--set-upstream`.
 ### 5. After a local rebase
 
 Rebasing a stacked branch on top of its (also-rebased) parent is normal.
-Re-run `sms stack` with `--force-with-lease`:
+Re-run `sms push` with `--force-with-lease`:
 
 ```sh
-sms stack --force-with-lease
+sms push --force-with-lease
 ```
 
 If a PR for the branch already exists, the tool just refreshes the push
 and prints the existing PR URL. It will not try to recreate it.
 
-### 6. Re-running on an existing PR
+### 6. Pushing updates to an existing PR (drop-in `git push`)
 
-Safe. The tool detects an existing open PR with the same head branch on the
-merge target, pushes any new commits, and reports:
+Once a branch has an open PR on the merge target, `sms push` is just
+`git push`: it pushes any new commits to the existing remote branch and
+reports the existing PR. No prompts, no PR mutations, no extra work —
+this is what makes `sms push` safe to use as a blanket replacement for
+`git push`.
 
 ```text
 ✔ PR already exists: #421 https://github.com/octocat/widgets/pull/421
@@ -315,7 +330,7 @@ merge target, pushes any new commits, and reports:
 
 It does **not** rewrite the PR's base. If a previously parent-less PR should
 now be stacked under a new parent, change the base in the GitHub UI (or
-delete the old PR). Keeping `stack` from silently mutating PR bases is
+delete the old PR). Keeping `push` from silently mutating PR bases is
 deliberate.
 
 ### 8. Merging a stack
@@ -343,7 +358,7 @@ branch and reopen the PR to recover.
 
 ### 9. Bail conditions
 
-`stack` refuses to run, with a clear message, in any of these states:
+`push` refuses to run, with a clear message, in any of these states:
 
 - mid-rebase, mid-merge, mid-cherry-pick, mid-revert, mid-bisect, mid-`am`
 - detached `HEAD`
@@ -358,7 +373,7 @@ branch and reopen the PR to recover.
 ## Flags
 
 ```text
-sms stack [OPTIONS]
+sms push [OPTIONS]
 
   -t, --title <TITLE>     PR title. If omitted, `gh pr create --fill`
                           populates from commits.
@@ -402,7 +417,7 @@ You can read the same algorithm directly in
 These are explicitly out of scope and unlikely to ever be added:
 
 - A stack overview or visualisation command. `gh pr list` already shows it.
-- A "submit the whole stack" command. `sms stack` per branch is plenty.
+- A "submit the whole stack" command. `sms push` per branch is plenty.
 - Auto-merging, auto-rebasing, conflict resolution, or any other workflow
   orchestration.
 - A local stack-state file of any kind. See "Design requirements".
