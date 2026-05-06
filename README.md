@@ -175,8 +175,11 @@ this tool is probably not for you.
 
 ## Install
 
-You need `git` and a working, authenticated `gh` (`gh auth status` should be
+Easiest is to grab a precompiled binary from the [releases](https://github.com/cjrh/stackymcstackface/releases).
+You will need `git` and a working, authenticated `gh` (`gh auth status` should be
 green).
+
+Or, you can build from source with Rust and Cargo:
 
 ```sh
 cargo install --path .
