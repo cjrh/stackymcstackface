@@ -416,7 +416,10 @@ fn closer(a: Parent, b: Parent) -> Parent {
 /// horizontal rule. Failures are non-fatal: the PR is already created with
 /// the correct base, so the worst case is a missing footer.
 fn append_stack_footer(pr_url: &str, parent_number: u64, parent_branch: &str) {
-    let footer = format!("Stacked on #{parent_number} (`{parent_branch}`).");
+    let footer = format!(
+        "Stacked on #{parent_number} (`{parent_branch}`) by \
+         [stackymcstackface](https://github.com/cjrh/stackymcstackface) ❤️"
+    );
     let result = (|| -> Result<()> {
         let current = gh::pr_body(pr_url)?;
         gh::set_pr_body(pr_url, &merge_body_with_footer(&current, &footer))
