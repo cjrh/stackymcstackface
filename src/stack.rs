@@ -19,7 +19,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use dialoguer::Confirm;
 
 use crate::gh::{self, CreatePrOpts, OpenPr, RepoInfo};
-use crate::git::{self, RepoState};
+use crate::git::{self, GitOutput, RepoState};
+use crate::ui::Console;
 
 /// User-facing options for `push`. Kept tiny on purpose; the goal is to
 /// match the manual workflow, not to grow flags.
@@ -38,16 +39,27 @@ pub struct StackOpts {
     /// Skip interactive prompts; assume "yes" for the wrong-remote rescue
     /// and bail (rather than prompt) for ambiguous situations.
     pub yes: bool,
+    /// Verbosity for git output: 0 hides fetch/push behind a spinner, 1
+    /// streams raw git output, 2+ also passes git its own `--verbose`.
+    pub verbose: u8,
 }
 
 pub fn run(opts: &StackOpts) -> Result<()> {
+    let console = Console::detect();
+    console.banner();
+
     let state = git::read_state().context("could not read git state")?;
     let branch = guard_state(&state)?;
 
+    console.section("PLAN");
+
     // Discover what we're pointed at on GitHub.
-    let local_repo = gh::repo_info(None)
-        .context("`gh repo view` failed; is this a GitHub repository and is `gh` authenticated?")?;
-    let target_repo = resolve_merge_target(&local_repo)?;
+    let target_repo = console.spinner("resolving merge target", || {
+        let local = gh::repo_info(None).context(
+            "`gh repo view` failed; is this a GitHub repository and is `gh` authenticated?",
+        )?;
+        resolve_merge_target(&local)
+    })?;
 
     if branch == target_repo.default_branch {
         bail!(
@@ -58,23 +70,32 @@ pub fn run(opts: &StackOpts) -> Result<()> {
     }
 
     let target_remote = resolve_merge_target_remote(&target_repo)?;
-    println!(
-        "→ merge target: {repo} (default branch `{default}`), remote `{remote}`",
+    console.field(&format!(
+        "{repo} · default {default} · remote {remote}",
         repo = target_repo.name_with_owner,
         default = target_repo.default_branch,
         remote = target_remote,
-    );
+    ));
 
-    warn_if_no_auto_delete(&target_repo);
+    warn_if_no_auto_delete(&console, &target_repo);
 
     // If a previous push went to the wrong remote, offer to rescue it.
-    rescue_wrong_remote(&state, &target_remote, opts.yes)?;
+    rescue_wrong_remote(&console, &state, &target_remote, opts.yes)?;
 
-    println!("→ fetching `{target_remote}` ...");
-    git::fetch(&target_remote).with_context(|| format!("git fetch {target_remote} failed"))?;
+    git_step(
+        &console,
+        opts.verbose,
+        &format!("fetching {target_remote}"),
+        |out| {
+            git::fetch(&target_remote, out)
+                .with_context(|| format!("git fetch {target_remote} failed"))
+        },
+    )?;
 
-    let prs = gh::list_open_prs(&target_repo.name_with_owner)
-        .context("could not list open PRs on the merge target")?;
+    let prs = console.spinner("scanning open pull requests", || {
+        gh::list_open_prs(&target_repo.name_with_owner)
+            .context("could not list open PRs on the merge target")
+    })?;
 
     let parent = pick_parent(&prs, &target_repo, &target_remote, &branch, &state.head_sha)?;
     let existing = prs
@@ -82,46 +103,48 @@ pub fn run(opts: &StackOpts) -> Result<()> {
         .find(|p| p.head_ref_name == branch && !p.is_cross_repository)
         .cloned();
 
-    print_plan(&parent, existing.as_ref(), &branch);
+    let (headline, note) = plan_sentence(&parent, existing.as_ref(), &branch);
+    console.plan(&headline, note.as_deref());
 
-    println!("→ pushing `{branch}` to `{target_remote}` ...");
-    git::push(&target_remote, &branch, opts.force_with_lease).with_context(|| {
-        format!(
-            "git push {target_remote} {branch} failed -- if you rebased, retry with --force-with-lease"
-        )
-    })?;
+    console.section("EXECUTE");
+
+    git_step(
+        &console,
+        opts.verbose,
+        &format!("pushing {branch} → {target_remote}"),
+        |out| {
+            git::push(&target_remote, &branch, opts.force_with_lease, out).with_context(|| {
+                format!(
+                    "git push {target_remote} {branch} failed -- if you rebased, retry with --force-with-lease"
+                )
+            })
+        },
+    )?;
+    console.done(&format!("pushed {branch} to {target_remote}"));
 
     if let Some(pr) = existing {
-        println!(
-            "✔ PR already exists: #{n} {url}\n  (base on GitHub: `{base}`)",
-            n = pr.number,
-            url = pr.url,
-            base = pr.base_ref_name,
-        );
+        console.url(&pr.url);
+        console.dim_line(&format!("base on GitHub: {}", pr.base_ref_name));
         return Ok(());
     }
 
     let base_branch = parent.branch_name();
-    println!(
-        "→ creating PR: head=`{branch}` base=`{base_branch}` repo={repo}",
-        repo = target_repo.name_with_owner,
-    );
     let create_opts = CreatePrOpts {
         title: opts.title.as_deref(),
         body: opts.body.as_deref(),
         draft: opts.draft,
         web: opts.web,
     };
-    let out = gh::create_pr(
-        &target_repo.name_with_owner,
-        base_branch,
-        &branch,
-        &create_opts,
-    )
-    .context("`gh pr create` failed")?;
-    if !out.is_empty() {
-        println!("{out}");
-    }
+    let out = console.spinner("creating pull request", || {
+        gh::create_pr(
+            &target_repo.name_with_owner,
+            base_branch,
+            &branch,
+            &create_opts,
+        )
+        .context("`gh pr create` failed")
+    })?;
+    console.done("opened pull request");
 
     // For stacked PRs, point the new PR's body at the parent. `--web` skips
     // create-from-CLI, so there's no URL to edit yet; let the user handle the
@@ -135,10 +158,38 @@ pub fn run(opts: &StackOpts) -> Result<()> {
     {
         let pr_url = out.trim();
         if pr_url.starts_with("https://") {
-            append_stack_footer(pr_url, *parent_number, parent_branch);
+            append_stack_footer(&console, pr_url, *parent_number, parent_branch);
         }
     }
+
+    if out.is_empty() {
+        console.dim_line("opened in your browser");
+    } else {
+        console.url(out.trim());
+    }
     Ok(())
+}
+
+// --- git step framing -------------------------------------------------------
+
+/// Run a git step, honouring verbosity. Quiet (verbose 0) hides the work
+/// behind a spinner labelled `lead`; verbose streams git's raw output to the
+/// terminal under a dim lead-in so it is available for troubleshooting. The
+/// `work` closure receives the matching [`GitOutput`] to pass down to git.
+fn git_step(
+    console: &Console,
+    verbose: u8,
+    lead: &str,
+    work: impl FnOnce(GitOutput) -> Result<()>,
+) -> Result<()> {
+    if verbose >= 1 {
+        console.dim_line(lead);
+        work(GitOutput::Stream {
+            verbose: verbose >= 2,
+        })
+    } else {
+        console.spinner(lead, || work(GitOutput::Quiet))
+    }
 }
 
 // --- repo-setting warnings --------------------------------------------------
@@ -147,18 +198,18 @@ pub fn run(opts: &StackOpts) -> Result<()> {
 /// GitHub does not retarget dependent stack PRs after the parent merges,
 /// so the stack effectively breaks at the first merge. The check happens
 /// every run rather than once because settings change behind our back.
-fn warn_if_no_auto_delete(target: &RepoInfo) {
+fn warn_if_no_auto_delete(console: &Console, target: &RepoInfo) {
     if target.delete_branch_on_merge {
         return;
     }
-    eprintln!(
-        "⚠  `delete_branch_on_merge` is OFF on {repo}. After this PR merges, \
+    console.warn(&format!(
+        "`delete_branch_on_merge` is OFF on {repo}. After this PR merges, \
          GitHub will not delete the head branch and the next stack PR will not \
-         auto-retarget to `{default}`. Enable with:\n     \
+         auto-retarget to `{default}`. Enable with:\n\
          gh api -X PATCH /repos/{repo} -f delete_branch_on_merge=true",
         repo = target.name_with_owner,
         default = target.default_branch,
-    );
+    ));
 }
 
 // --- state guards -----------------------------------------------------------
@@ -263,24 +314,27 @@ fn url_points_at(url: &str, name_with_owner: &str) -> bool {
 
 /// If the current branch tracks a different remote than the merge target,
 /// the user has likely pushed to (e.g.) `origin` of a fork. Offer to fix it.
-fn rescue_wrong_remote(state: &RepoState, target_remote: &str, assume_yes: bool) -> Result<()> {
+fn rescue_wrong_remote(
+    console: &Console,
+    state: &RepoState,
+    target_remote: &str,
+    assume_yes: bool,
+) -> Result<()> {
     let Some((upstream_remote, _)) = state.upstream.as_ref() else {
         return Ok(());
     };
     if upstream_remote == target_remote {
         return Ok(());
     }
-    eprintln!();
-    eprintln!(
-        "⚠  current branch tracks `{upstream_remote}/...` but the merge target is `{target_remote}`."
-    );
-    eprintln!("   Stacked PRs only work when the branch lives on the merge-target remote.");
-    eprintln!();
+    console.warn(&format!(
+        "current branch tracks `{upstream_remote}/...` but the merge target is `{target_remote}`.\n\
+         Stacked PRs only work when the branch lives on the merge-target remote."
+    ));
     let ok = if assume_yes {
         true
     } else {
-        // Force-flush so the prompt prints in line order even when stdout is a pipe.
-        let _ = io::stderr().flush();
+        // Flush the warning (printed to stdout) so it lands before the prompt.
+        let _ = io::stdout().flush();
         Confirm::new()
             .with_prompt(format!("Re-push to `{target_remote}` and switch tracking?"))
             .default(true)
@@ -415,18 +469,18 @@ fn closer(a: Parent, b: Parent) -> Parent {
 /// separated from whatever `--fill` (or the user) put there by a `---`
 /// horizontal rule. Failures are non-fatal: the PR is already created with
 /// the correct base, so the worst case is a missing footer.
-fn append_stack_footer(pr_url: &str, parent_number: u64, parent_branch: &str) {
+fn append_stack_footer(console: &Console, pr_url: &str, parent_number: u64, parent_branch: &str) {
     let footer = format!(
         "Stacked on #{parent_number} (`{parent_branch}`) by \
          [stackymcstackface](https://github.com/cjrh/stackymcstackface) ❤️"
     );
-    let result = (|| -> Result<()> {
+    let result = console.spinner("noting parent in PR description", || {
         let current = gh::pr_body(pr_url)?;
         gh::set_pr_body(pr_url, &merge_body_with_footer(&current, &footer))
-    })();
+    });
     match result {
-        Ok(()) => println!("→ noted parent #{parent_number} in PR description"),
-        Err(e) => eprintln!("⚠  could not update PR description: {e:#}"),
+        Ok(()) => console.done(&format!("noted parent #{parent_number} in description")),
+        Err(e) => console.warn(&format!("could not update PR description: {e:#}")),
     }
 }
 
@@ -442,20 +496,25 @@ fn merge_body_with_footer(current: &str, footer: &str) -> String {
     }
 }
 
-// --- plan printing ----------------------------------------------------------
+// --- plan wording -----------------------------------------------------------
 
-fn print_plan(parent: &Parent, existing: Option<&OpenPr>, branch: &str) {
+/// Build the PLAN section's wording for the situation we resolved to: a
+/// headline sentence plus an optional dim follow-on (the existing PR number,
+/// or the parent a stacked PR will sit on). Pure so it can be unit-tested.
+fn plan_sentence(
+    parent: &Parent,
+    existing: Option<&OpenPr>,
+    branch: &str,
+) -> (String, Option<String>) {
     match (existing, parent) {
-        (Some(pr), _) => {
-            println!(
-                "→ plan: push updates to `{branch}` (PR #{n}: {url})",
-                n = pr.number,
-                url = pr.url
-            );
-        }
-        (None, Parent::Default { branch: base }) => {
-            println!("→ plan: push `{branch}` and open a PR with base `{base}`");
-        }
+        (Some(pr), _) => (
+            format!("push new commits to {branch}"),
+            Some(format!("PR #{} already open", pr.number)),
+        ),
+        (None, Parent::Default { branch: base }) => (
+            format!("push {branch} and open a PR with base {base}"),
+            None,
+        ),
         (
             None,
             Parent::Pr {
@@ -464,12 +523,10 @@ fn print_plan(parent: &Parent, existing: Option<&OpenPr>, branch: &str) {
                 url,
                 ..
             },
-        ) => {
-            println!(
-                "→ plan: push `{branch}` and open a STACKED PR on top of #{number} \
-                 (base `{base}`)\n        parent: {url}"
-            );
-        }
+        ) => (
+            format!("push {branch} and open a stacked PR with base {base}"),
+            Some(format!("parent: #{number} {url}")),
+        ),
     }
 }
 
@@ -528,5 +585,54 @@ mod tests {
             merge_body_with_footer("   \n\n", "Stacked on #5."),
             "Stacked on #5."
         );
+    }
+
+    fn open_pr(number: u64, base: &str) -> OpenPr {
+        OpenPr {
+            number,
+            head_ref_name: "feat".into(),
+            head_ref_oid: "deadbeef".into(),
+            base_ref_name: base.into(),
+            head_repository_owner: "octocat".into(),
+            url: format!("https://example/pull/{number}"),
+            is_cross_repository: false,
+        }
+    }
+
+    #[test]
+    fn plan_existing_pr_takes_precedence_over_parent() {
+        let parent = Parent::Default {
+            branch: "main".into(),
+        };
+        let existing = open_pr(7, "main");
+        let (headline, note) = plan_sentence(&parent, Some(&existing), "feat");
+        assert_eq!(headline, "push new commits to feat");
+        assert_eq!(note.as_deref(), Some("PR #7 already open"));
+    }
+
+    #[test]
+    fn plan_regular_pr_has_no_note() {
+        let parent = Parent::Default {
+            branch: "main".into(),
+        };
+        let (headline, note) = plan_sentence(&parent, None, "feat");
+        assert_eq!(headline, "push feat and open a PR with base main");
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn plan_stacked_pr_names_parent() {
+        let parent = Parent::Pr {
+            branch: "feat-base".into(),
+            number: 3,
+            url: "https://example/pull/3".into(),
+            distance: 1,
+        };
+        let (headline, note) = plan_sentence(&parent, None, "feat");
+        assert_eq!(
+            headline,
+            "push feat and open a stacked PR with base feat-base"
+        );
+        assert_eq!(note.as_deref(), Some("parent: #3 https://example/pull/3"));
     }
 }

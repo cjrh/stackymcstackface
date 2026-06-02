@@ -35,13 +35,21 @@ sms push
 
 Output:
 ```text
-→ plan: push `feat/parser` and open a PR with base `main`
-→ pushing `feat/parser` to `origin` ...
-→ creating PR: head=`feat/parser` base=`main` repo=octocat/widgets
-https://github.com/octocat/widgets/pull/421
+stackymcstackface
+
+PLAN
+  octocat/widgets · default main · remote origin
+  push feat/parser and open a PR with base main
+
+EXECUTE
+  ✔ pushed feat/parser to origin
+  ✔ opened pull request
+
+  https://github.com/octocat/widgets/pull/421
 ```
 
-Pushed, PR opened.
+Pushed, PR opened. The fetch, PR scan, and push run behind spinners; pass
+`-v` to stream git's raw output instead (handy for troubleshooting).
 
 *If your local clone is a fork of the merge target, `sms push` sends the branch to the **parent** repo (e.g. `upstream`), not your fork; this is handled automatically. See [Caveats](#caveats).*
 
@@ -55,12 +63,19 @@ sms push
 
 Output:
 ```text
-→ plan: push `feat/parser-tests` and open a STACKED PR on top of #421 (base `feat/parser`)
-        parent: https://github.com/octocat/widgets/pull/421
-→ pushing `feat/parser-tests` to `origin` ...
-→ creating PR: head=`feat/parser-tests` base=`feat/parser` repo=octocat/widgets
-https://github.com/octocat/widgets/pull/422
-→ noted parent #421 in PR description
+stackymcstackface
+
+PLAN
+  octocat/widgets · default main · remote origin
+  push feat/parser-tests and open a stacked PR with base feat/parser
+    parent: #421 https://github.com/octocat/widgets/pull/421
+
+EXECUTE
+  ✔ pushed feat/parser-tests to origin
+  ✔ opened pull request
+  ✔ noted parent #421 in description
+
+  https://github.com/octocat/widgets/pull/422
 ```
 
 Pushed, *stacked* PR opened: base is `feat/parser` (not `main`), and a `Stacked on #421` line is appended to the PR body.
@@ -73,10 +88,18 @@ sms push
 ```
 
 ```text
-→ plan: push updates to `feat/parser-tests` (PR #422: https://github.com/octocat/widgets/pull/422)
-→ pushing `feat/parser-tests` to `origin` ...
-✔ PR already exists: #422 https://github.com/octocat/widgets/pull/422
-  (base on GitHub: `feat/parser`)
+stackymcstackface
+
+PLAN
+  octocat/widgets · default main · remote origin
+  push new commits to feat/parser-tests
+    PR #422 already open
+
+EXECUTE
+  ✔ pushed feat/parser-tests to origin
+
+  https://github.com/octocat/widgets/pull/422
+  base on GitHub: feat/parser
 ```
 
 Just pushes. No prompts, no PR mutations.
@@ -298,12 +321,17 @@ sms push
 ```
 
 ```text
-→ merge target: octocat/widgets (default branch `main`), remote `origin`
-→ fetching `origin` ...
-→ plan: push `feat/parser-cleanup` and open a PR with base `main`
-→ pushing `feat/parser-cleanup` to `origin` ...
-→ creating PR: head=`feat/parser-cleanup` base=`main` repo=octocat/widgets
-https://github.com/octocat/widgets/pull/421
+stackymcstackface
+
+PLAN
+  octocat/widgets · default main · remote origin
+  push feat/parser-cleanup and open a PR with base main
+
+EXECUTE
+  ✔ pushed feat/parser-cleanup to origin
+  ✔ opened pull request
+
+  https://github.com/octocat/widgets/pull/421
 ```
 
 ### 2. Stacking on top of an existing PR
@@ -316,15 +344,19 @@ sms push
 ```
 
 ```text
-→ merge target: octocat/widgets (default branch `main`), remote `origin`
-→ fetching `origin` ...
-→ plan: push `feat/parser-cleanup-tests` and open a STACKED PR on top of #421
-        (base `feat/parser-cleanup`)
-        parent: https://github.com/octocat/widgets/pull/421
-→ pushing `feat/parser-cleanup-tests` to `origin` ...
-→ creating PR: head=`feat/parser-cleanup-tests` base=`feat/parser-cleanup` ...
-https://github.com/octocat/widgets/pull/422
-→ noted parent #421 in PR description
+stackymcstackface
+
+PLAN
+  octocat/widgets · default main · remote origin
+  push feat/parser-cleanup-tests and open a stacked PR with base feat/parser-cleanup
+    parent: #421 https://github.com/octocat/widgets/pull/421
+
+EXECUTE
+  ✔ pushed feat/parser-cleanup-tests to origin
+  ✔ opened pull request
+  ✔ noted parent #421 in description
+
+  https://github.com/octocat/widgets/pull/422
 ```
 
 The parent is found by walking your branch's ancestry and picking the
@@ -354,9 +386,8 @@ sms push
 ```
 
 ```text
-⚠  current branch tracks `origin/...` but the merge target is `upstream`.
-   Stacked PRs only work when the branch lives on the merge-target remote.
-
+  ⚠ current branch tracks `origin/...` but the merge target is `upstream`.
+    Stacked PRs only work when the branch lives on the merge-target remote.
 Re-push to `upstream` and switch tracking? (Y/n)
 ```
 
@@ -384,8 +415,11 @@ This is what makes `sms push` safe to use as a blanket replacement for
 `git push`.
 
 ```text
-✔ PR already exists: #421 https://github.com/octocat/widgets/pull/421
-  (base on GitHub: `main`)
+EXECUTE
+  ✔ pushed feat/parser-cleanup to origin
+
+  https://github.com/octocat/widgets/pull/421
+  base on GitHub: main
 ```
 
 It does **not** rewrite the PR's base. If a previously parent-less PR should
@@ -445,7 +479,15 @@ sms push [OPTIONS]
                           rebase.
   -y, --yes               Skip interactive prompts (assume "yes" for the
                           wrong-remote rescue).
+  -v, --verbose           Show raw git output for fetch/push instead of
+                          hiding it behind a spinner. Repeat (-vv) to also
+                          pass git its own --verbose.
 ```
+
+By default `push` groups its work into a `PLAN` section (what it will do)
+and an `EXECUTE` section (pushing and opening the PR), with spinners over
+the `git`/`gh` calls and the PR URL printed last. Output is colourised on
+a terminal and plain when piped; `NO_COLOR` is honoured.
 
 ## How it works (the short version)
 

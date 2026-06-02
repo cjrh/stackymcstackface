@@ -11,6 +11,7 @@ mod doctor;
 mod gh;
 mod git;
 mod stack;
+mod ui;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -65,6 +66,12 @@ struct PushArgs {
     /// Skip interactive prompts (assume "yes" to safe rescues).
     #[arg(short = 'y', long)]
     yes: bool,
+
+    /// Show raw git output for troubleshooting. Repeat (`-vv`) to also pass
+    /// git its own `--verbose`. Without it, fetch/push progress is hidden
+    /// behind a spinner.
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    verbose: u8,
 }
 
 impl From<PushArgs> for stack::StackOpts {
@@ -76,6 +83,7 @@ impl From<PushArgs> for stack::StackOpts {
             web: a.web,
             force_with_lease: a.force_with_lease,
             yes: a.yes,
+            verbose: a.verbose,
         }
     }
 }
@@ -86,7 +94,7 @@ fn main() -> ExitCode {
         Cmd::Push(args) => match stack::run(&args.into()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("error: {e:#}");
+                ui::print_error(&format!("{e:#}"));
                 ExitCode::from(1)
             }
         },

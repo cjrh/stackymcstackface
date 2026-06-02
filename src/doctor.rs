@@ -5,11 +5,9 @@
 //! Does not fetch, push, or mutate anything on GitHub. Exit code is 1 if
 //! any check failed; warnings are advisory.
 
-use std::io::IsTerminal;
 use std::process::{Command, ExitCode};
 
-use anstyle::{AnsiColor, Color, Style};
-
+use crate::ui::Palette;
 use crate::{gh, git, stack};
 
 /// Run all checks and print a coloured report to stdout.
@@ -388,43 +386,5 @@ impl<'p> Report<'p> {
 
     fn has_fail(&self) -> bool {
         self.fail > 0
-    }
-}
-
-// --- colour ---------------------------------------------------------------
-
-/// Wraps anstyle's `Style` with a single on/off switch determined by tty
-/// detection and the `NO_COLOR` env var. Disabled palettes hand back empty
-/// `Style`s, whose `render*()` output is empty -- so callers never need to
-/// branch on whether colour is on.
-struct Palette {
-    enabled: bool,
-}
-
-impl Palette {
-    fn detect() -> Self {
-        Self {
-            enabled: std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
-        }
-    }
-
-    fn maybe(&self, s: Style) -> Style {
-        if self.enabled { s } else { Style::new() }
-    }
-
-    fn green(&self) -> Style {
-        self.maybe(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))))
-    }
-    fn yellow(&self) -> Style {
-        self.maybe(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow))))
-    }
-    fn red(&self) -> Style {
-        self.maybe(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red))))
-    }
-    fn bold(&self) -> Style {
-        self.maybe(Style::new().bold())
-    }
-    fn dim(&self) -> Style {
-        self.maybe(Style::new().dimmed())
     }
 }

@@ -116,22 +116,44 @@ fn detect_in_progress(git_dir: &Path) -> Option<InProgress> {
     None
 }
 
-/// `git fetch <remote>` -- streamed straight to the user's terminal so they
-/// see progress on big fetches.
-pub fn fetch(remote: &str) -> Result<()> {
-    run_inherit(&["fetch", remote])
+/// How a fetch/push should treat git's own chatter. The caller picks this from
+/// its verbosity setting; the quiet default hides progress behind the UI's
+/// spinner, while the streaming modes hand git the terminal so the raw output
+/// is there to troubleshoot with.
+#[derive(Debug, Clone, Copy)]
+pub enum GitOutput {
+    /// Capture and discard output on success; failures still carry git's
+    /// stderr in the returned error. The quiet default.
+    Quiet,
+    /// Inherit the user's terminal so progress is visible. `verbose` adds
+    /// git's own `--verbose` for extra detail.
+    Stream { verbose: bool },
+}
+
+/// `git fetch <remote>`, with output handled per `output`.
+pub fn fetch(remote: &str, output: GitOutput) -> Result<()> {
+    let mut args = vec!["fetch"];
+    if matches!(output, GitOutput::Stream { verbose: true }) {
+        args.push("--verbose");
+    }
+    args.push(remote);
+    run_git(&args, output)
 }
 
 /// Push `branch` to `remote`, setting upstream tracking. Optionally use
-/// `--force-with-lease` for safe re-pushes after a local rebase.
-pub fn push(remote: &str, branch: &str, force_with_lease: bool) -> Result<()> {
+/// `--force-with-lease` for safe re-pushes after a local rebase. Output is
+/// handled per `output`.
+pub fn push(remote: &str, branch: &str, force_with_lease: bool, output: GitOutput) -> Result<()> {
     let mut args = vec!["push", "--set-upstream"];
     if force_with_lease {
         args.push("--force-with-lease");
     }
+    if matches!(output, GitOutput::Stream { verbose: true }) {
+        args.push("--verbose");
+    }
     args.push(remote);
     args.push(branch);
-    run_inherit(&args)
+    run_git(&args, output)
 }
 
 /// True iff `ancestor` is an ancestor of (or equal to) `descendant`.
@@ -237,6 +259,15 @@ fn run(args: &[&str]) -> Result<String> {
         return Err(anyhow!("git {} failed: {}", args.join(" "), stderr.trim()));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Run `git <args>`, dispatching on the requested output handling. `Quiet`
+/// captures (and discards) stdout; the `Stream` variants inherit the terminal.
+fn run_git(args: &[&str], output: GitOutput) -> Result<()> {
+    match output {
+        GitOutput::Quiet => run(args).map(|_| ()),
+        GitOutput::Stream { .. } => run_inherit(args),
+    }
 }
 
 /// Run `git <args>` and inherit the user's stdout/stderr. Used for commands
