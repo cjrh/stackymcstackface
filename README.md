@@ -21,6 +21,36 @@ which case applies.
 You can make a shell alias like `alias sms=stackymcstackface` or whatever
 you like for daily use. See [Install](#install).
 
+## Goals
+
+The manual stacked-PR workflow on GitHub is not complicated:
+- push your branch to the merge-target repo (not your fork, if you are on a fork)
+- open a PR with the parent branch (a separate PR) as the base (not `main`)
+- when the parent PR is merged, and that branch is deleted, GitHub automatically retargets the next PR so its base becomes `main`
+
+You can create a chain of these, which means you can keep working, doing new
+fixes and features in new PRs stacked on top of previous PRs, without waiting for the earlier ones to merge.
+
+But the process has two fiddly bits that are easy to get wrong:
+
+1. The branches must live on the same remote as the PRs themselves
+   (otherwise stacking silently breaks, which is particularly painful when
+   working from a fork).
+2. When you create the PR, you have to pick the right base branch by hand, in the UI:
+   the parent branch in the stack, not `main`.
+
+`stackymcstackface` automates exactly those two steps. Reviewing and
+rebasing stay the normal GitHub workflow you already know. So does
+merging, with one prerequisite: when a stack PR merges, GitHub only
+auto-retargets the next PR if the merged head branch is deleted through
+GitHub's own merge flow. That means the post-merge "Delete branch"
+button on the PR page, or the repo-level "Automatically delete head
+branches" setting. Manual `git push --delete origin <branch>` (or the
+equivalent low-level API call) bypasses the retarget logic and **closes**
+the next PR instead. See [Repo setup](#repo-setup-one-time) and
+[Merging a stack](#8-merging-a-stack).
+
+
 ## Demo
 
 The same command in three situations:
@@ -137,64 +167,6 @@ or restrict the repo defaults under Settings → General → Pull Requests.
 
 See [Repo setup](#repo-setup-one-time) and [Merging a stack](#8-merging-a-stack)
 for the details.
-
-## Goals
-
-The manual stacked-PR workflow on GitHub is not complicated, but it has two
-fiddly bits that are easy to get wrong:
-
-1. The branches must live on the same remote as the PRs themselves
-   (otherwise stacking silently breaks, which is particularly painful when
-   working from a fork).
-2. When you create the PR, you have to pick the right base branch by hand:
-   the parent branch in the stack, not `main`.
-
-`stackymcstackface` automates exactly those two steps. Reviewing and
-rebasing stay the normal GitHub workflow you already know. So does
-merging, with one prerequisite: when a stack PR merges, GitHub only
-auto-retargets the next PR if the merged head branch is deleted through
-GitHub's own merge flow. That means the post-merge "Delete branch"
-button on the PR page, or the repo-level "Automatically delete head
-branches" setting. Manual `git push --delete origin <branch>` (or the
-equivalent low-level API call) bypasses the retarget logic and **closes**
-the next PR instead. See [Repo setup](#repo-setup-one-time) and
-[Merging a stack](#8-merging-a-stack).
-
-## Design requirements
-
-These are the design constraints behind the tool. If you do not share them,
-this tool is probably not for you.
-
-- **No local state.** Other stacking tools maintain a sidecar file
-  describing the stack and its state. That file rots. Once it disagrees
-  with reality on GitHub (which happens *most* once you have five or six
-  PRs in a stack), the tooling becomes harder to fix than the manual
-  workflow it replaced. Every invocation of `push` reconstructs the
-  picture from authoritative sources only: `git fetch`,
-  `git merge-base --is-ancestor`, and `gh pr list`. Nothing to keep in
-  sync because there is nothing to sync.
-
-- **Push to the merge-target remote, never anywhere else.** For non-fork
-  repos that means `origin`. For forks, it almost always means `upstream`
-  (or whatever you call the remote pointing at the parent). The tool
-  figures this out by asking GitHub for `isFork`/`parent` and matching
-  against your configured git remotes.
-
-- **Detect a wrong-remote push and offer to fix it.** If you have already
-  pushed your branch to your fork's `origin`, the tool notices and prompts
-  before re-pushing to the correct remote and switching the upstream
-  tracking ref.
-
-- **Do as little as possible.** One subcommand. Push the branch, open the
-  PR, print the URL. That is the whole tool. There is no `submit-stack`,
-  no `restack`, no `land`, and no merge orchestration; GitHub already does
-  those.
-
-- **Refuse to act on a dirty repo state.** If the repo is mid-rebase,
-  mid-merge, mid-cherry-pick, mid-revert, mid-bisect, or mid-`am`, `push`
-  bails and tells you what it found. **Uncommitted changes are fine.** A
-  common workflow is to peel one PR at a time off a large set of local
-  changes.
 
 ## Install
 
@@ -313,6 +285,42 @@ is in a state `push` would accept. Output is colour-coded
 (`✔` / `⚠` / `✗`); the command exits non-zero if any check failed.
 Honours `NO_COLOR` and disables colour automatically when stdout is not
 a terminal. It never fetches, pushes, or mutates anything on GitHub.
+
+## Design requirements
+
+These are the design constraints behind the tool. If you do not share them,
+this tool is probably not for you.
+
+- **No local state.** Other stacking tools maintain a sidecar file
+  describing the stack and its state. That file rots. Once it disagrees
+  with reality on GitHub (which happens *most* once you have five or six
+  PRs in a stack), the tooling becomes harder to fix than the manual
+  workflow it replaced. Every invocation of `push` reconstructs the
+  picture from authoritative sources only: `git fetch`,
+  `git merge-base --is-ancestor`, and `gh pr list`. Nothing to keep in
+  sync because there is nothing to sync.
+
+- **Push to the merge-target remote, never anywhere else.** For non-fork
+  repos that means `origin`. For forks, it almost always means `upstream`
+  (or whatever you call the remote pointing at the parent). The tool
+  figures this out by asking GitHub for `isFork`/`parent` and matching
+  against your configured git remotes.
+
+- **Detect a wrong-remote push and offer to fix it.** If you have already
+  pushed your branch to your fork's `origin`, the tool notices and prompts
+  before re-pushing to the correct remote and switching the upstream
+  tracking ref.
+
+- **Do as little as possible.** One subcommand. Push the branch, open the
+  PR, print the URL. That is the whole tool. There is no `submit-stack`,
+  no `restack`, no `land`, and no merge orchestration; GitHub already does
+  those.
+
+- **Refuse to act on a dirty repo state.** If the repo is mid-rebase,
+  mid-merge, mid-cherry-pick, mid-revert, mid-bisect, or mid-`am`, `push`
+  bails and tells you what it found. **Uncommitted changes are fine.** A
+  common workflow is to peel one PR at a time off a large set of local
+  changes.
 
 ## Configuration
 
