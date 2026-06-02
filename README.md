@@ -198,17 +198,36 @@ this tool is probably not for you.
 
 ## Install
 
-Easiest is to grab a precompiled binary from the [releases](https://github.com/cjrh/stackymcstackface/releases).
-You will need `git` and a working, authenticated `gh` (`gh auth status` should be
-green).
+Whichever way you install, you also need `git` and a working,
+authenticated `gh` (`gh auth status` should be green).
 
-Or, you can build from source with Rust and Cargo:
+The easiest install is with
+[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall): it
+downloads a precompiled binary from the GitHub releases, so there is no
+Rust toolchain or compile step. This crate is not published to crates.io,
+so point `binstall` at the repository instead of a crate name:
+
+```sh
+cargo binstall --git https://github.com/cjrh/stackymcstackface stackymcstackface
+```
+
+`binstall` reads the version from the repo, finds the matching release,
+and drops the `stackymcstackface` binary on your `PATH`.
+
+No `cargo binstall`? Grab a precompiled binary by hand from the
+[releases page](https://github.com/cjrh/stackymcstackface/releases) and
+put it on your `PATH`, or [build from source](#building-from-source).
+
+### Building from source
+
+If you have a Rust toolchain and want to compile it yourself (for example
+to hack on the tool), install from the working tree:
 
 ```sh
 cargo install --path .
 ```
 
-This installs the binary as `stackymcstackface` on your `PATH`.
+This builds and installs the binary as `stackymcstackface` on your `PATH`.
 
 ### Repo setup (one-time)
 
