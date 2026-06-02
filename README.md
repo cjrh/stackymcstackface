@@ -547,3 +547,10 @@ Background on the GitHub mechanics this tool relies on:
 ## License
 
 GPL-3.0-or-later. See [`LICENSE`](LICENSE) for the full text.
+
+## Disambiguation
+
+I thought I was very clever choosing a unique name, but it turns out other
+projects have already used it:
+- https://github.com/RickCarlino/stacky_mcstackface - A stack-based VM in js
+- https://github.com/mp4096/smsf - Another stack-based VM
