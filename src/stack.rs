@@ -77,7 +77,7 @@ pub fn run(opts: &StackOpts) -> Result<()> {
         remote = target_remote,
     ));
 
-    warn_if_no_auto_delete(&console, &target_repo);
+    let enable_auto_delete = plan_auto_delete(&console, &target_repo, opts.yes);
 
     // If a previous push went to the wrong remote, offer to rescue it.
     rescue_wrong_remote(&console, &state, &target_remote, opts.yes)?;
@@ -107,6 +107,17 @@ pub fn run(opts: &StackOpts) -> Result<()> {
     console.plan(&headline, note.as_deref());
 
     console.section("EXECUTE");
+
+    if enable_auto_delete {
+        match console.spinner("enabling delete_branch_on_merge", || {
+            gh::set_delete_branch_on_merge(&target_repo.name_with_owner)
+        }) {
+            Ok(()) => console.done("enabled delete_branch_on_merge"),
+            // Non-fatal: the push and PR are the user's actual goal, and the
+            // setting only matters at the *next* merge. Warn and carry on.
+            Err(e) => console.warn(&format!("could not enable delete_branch_on_merge: {e:#}")),
+        }
+    }
 
     git_step(
         &console,
@@ -192,21 +203,68 @@ fn git_step(
     }
 }
 
-// --- repo-setting warnings --------------------------------------------------
+// --- repo-setting offer -----------------------------------------------------
 
-/// Warn when the merge target lacks `delete_branch_on_merge`. Without it,
-/// GitHub does not retarget dependent stack PRs after the parent merges,
-/// so the stack effectively breaks at the first merge. The check happens
-/// every run rather than once because settings change behind our back.
-fn warn_if_no_auto_delete(console: &Console, target: &RepoInfo) {
+/// Decide what to do about a merge target that lacks `delete_branch_on_merge`,
+/// and return `true` when the caller should enable it in the EXECUTE phase.
+///
+/// The setting matters because GitHub only retargets dependent stack PRs after
+/// the parent merges when the parent's head branch is deleted through the merge
+/// flow -- which only happens with this on. So the stack breaks at the first
+/// merge without it. Checked every run rather than once because the setting can
+/// change behind our back.
+///
+/// Branches on whether we *can* fix it. With admin rights we offer to enable
+/// it (auto-confirmed under `--yes`); otherwise -- or if the user declines --
+/// we fall back to a warning with the manual command, since someone with admin
+/// may hold the rights we lack. The interaction lives here in PLAN, mirroring
+/// the wrong-remote rescue; the mutation itself is deferred to EXECUTE.
+fn plan_auto_delete(console: &Console, target: &RepoInfo, assume_yes: bool) -> bool {
     if target.delete_branch_on_merge {
-        return;
+        return false;
+    }
+    if !target.viewer_is_admin() {
+        warn_no_auto_delete(console, target);
+        return false;
+    }
+    if assume_yes {
+        return true;
     }
     console.warn(&format!(
-        "`delete_branch_on_merge` is OFF on {repo}. After this PR merges, \
-         GitHub will not delete the head branch and the next stack PR will not \
-         auto-retarget to `{default}`. Enable with:\n\
-         gh api -X PATCH /repos/{repo} -f delete_branch_on_merge=true",
+        "`delete_branch_on_merge` is OFF on {repo}. After a stack PR merges, \
+         GitHub will not delete the head branch and the next PR will not \
+         auto-retarget to `{default}`.",
+        repo = target.name_with_owner,
+        default = target.default_branch,
+    ));
+    // Flush the warning (printed to stdout) so it lands before the prompt.
+    let _ = io::stdout().flush();
+    let yes = Confirm::new()
+        .with_prompt("Enable `delete_branch_on_merge` now?")
+        .default(true)
+        .interact()
+        .unwrap_or(false);
+    if !yes {
+        console.dim_line(&format!(
+            "leaving it off — enable later with: \
+             gh api -X PATCH /repos/{repo} -F delete_branch_on_merge=true",
+            repo = target.name_with_owner,
+        ));
+    }
+    yes
+}
+
+/// Warn that `delete_branch_on_merge` is off and the viewer cannot change it,
+/// handing over the command for someone who can. Used when the viewer lacks
+/// admin rights -- the only path that still just warns, since we have no action
+/// to offer.
+fn warn_no_auto_delete(console: &Console, target: &RepoInfo) {
+    console.warn(&format!(
+        "`delete_branch_on_merge` is OFF on {repo} and you lack admin rights to \
+         change it. After a stack PR merges, GitHub will not delete the head \
+         branch and the next PR will not auto-retarget to `{default}`. Ask an \
+         admin to enable it:\n\
+         gh api -X PATCH /repos/{repo} -F delete_branch_on_merge=true",
         repo = target.name_with_owner,
         default = target.default_branch,
     ));

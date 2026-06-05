@@ -26,6 +26,21 @@ pub struct RepoInfo {
     /// parent merges, because GitHub only retargets when the head branch
     /// is deleted through the merge flow.
     pub delete_branch_on_merge: bool,
+    /// The authenticated user's permission level on this repo, as GitHub's
+    /// `RepositoryPermission` enum (`ADMIN`, `MAINTAIN`, `WRITE`, `TRIAGE`,
+    /// `READ`). `None` when GitHub does not report one. Used to decide whether
+    /// the viewer may change repo settings -- see [`RepoInfo::viewer_is_admin`].
+    pub viewer_permission: Option<String>,
+}
+
+impl RepoInfo {
+    /// True when the authenticated user can change repository settings -- i.e.
+    /// run the `PATCH /repos/{owner}/{repo}` that toggles
+    /// `delete_branch_on_merge`. GitHub gates repo administration on the
+    /// `ADMIN` permission level, so anything weaker cannot apply the change.
+    pub fn viewer_is_admin(&self) -> bool {
+        self.viewer_permission.as_deref() == Some("ADMIN")
+    }
 }
 
 /// One open pull request, as far as `stack` cares.
@@ -50,6 +65,8 @@ pub struct OpenPr {
 /// - `isFork`               — true when this repo was forked from another
 /// - `parent`               — only populated when `isFork`; has `nameWithOwner`
 /// - `deleteBranchOnMerge`  — controls whether stacked-PR auto-retargeting works
+/// - `viewerPermission`     — caller's permission level; gates offering to
+///   change repo settings (see [`RepoInfo::viewer_is_admin`])
 pub fn repo_info(name_with_owner: Option<&str>) -> Result<RepoInfo> {
     #[derive(Deserialize)]
     struct Raw {
@@ -62,6 +79,8 @@ pub fn repo_info(name_with_owner: Option<&str>) -> Result<RepoInfo> {
         parent: Option<ParentRef>,
         #[serde(rename = "deleteBranchOnMerge")]
         delete_branch_on_merge: bool,
+        #[serde(rename = "viewerPermission")]
+        viewer_permission: Option<String>,
     }
     #[derive(Deserialize)]
     struct DefaultBranchRef {
@@ -77,7 +96,7 @@ pub fn repo_info(name_with_owner: Option<&str>) -> Result<RepoInfo> {
         "repo",
         "view",
         "--json",
-        "nameWithOwner,defaultBranchRef,isFork,parent,deleteBranchOnMerge",
+        "nameWithOwner,defaultBranchRef,isFork,parent,deleteBranchOnMerge,viewerPermission",
     ];
     if let Some(target) = name_with_owner {
         args.insert(2, target);
@@ -91,6 +110,7 @@ pub fn repo_info(name_with_owner: Option<&str>) -> Result<RepoInfo> {
         is_fork: raw.is_fork,
         parent_name_with_owner: raw.parent.map(|p| p.name_with_owner),
         delete_branch_on_merge: raw.delete_branch_on_merge,
+        viewer_permission: raw.viewer_permission,
     })
 }
 
@@ -228,6 +248,25 @@ pub fn pr_body(pr: &str) -> Result<String> {
 /// `pr_body`.
 pub fn set_pr_body(pr: &str, body: &str) -> Result<()> {
     run_capture(&["pr", "edit", pr, "--body", body])?;
+    Ok(())
+}
+
+/// Enable "Automatically delete head branches" on `repo` (`owner/name`) via
+/// `PATCH /repos/{repo}`. This is the setting stacked PRs need so GitHub
+/// retargets dependents after a parent merges. Requires admin rights on the
+/// repo; callers should gate on [`RepoInfo::viewer_is_admin`] first, since the
+/// API returns 403 otherwise. `-F` (not `-f`) so the value is sent as a real
+/// boolean rather than the string `"true"`.
+pub fn set_delete_branch_on_merge(repo: &str) -> Result<()> {
+    let path = format!("/repos/{repo}");
+    run_capture(&[
+        "api",
+        "-X",
+        "PATCH",
+        &path,
+        "-F",
+        "delete_branch_on_merge=true",
+    ])?;
     Ok(())
 }
 

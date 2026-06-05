@@ -209,8 +209,8 @@ fn probe_delete_on_merge(target: &gh::RepoInfo) -> Outcome {
     } else {
         Outcome::warn(format!(
             "off on {repo}; once a stack PR merges, the next PR will not \
-             auto-retarget. Enable with:\n  \
-             gh api -X PATCH /repos/{repo} -f delete_branch_on_merge=true",
+             auto-retarget. `push` offers to enable it for admins; or run:\n  \
+             gh api -X PATCH /repos/{repo} -F delete_branch_on_merge=true",
             repo = target.name_with_owner,
         ))
     }

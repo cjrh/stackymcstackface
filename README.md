@@ -148,10 +148,12 @@ If you're in bucket (3) and want a stack, the only options are out-of-band: get 
 
 For the auto-retarget to work end to end:
 
-1. GitHub setting **`delete_branch_on_merge` must be enabled.** Run once per repo:
+1. GitHub setting **`delete_branch_on_merge` must be enabled.** `sms push`
+   offers to do this for you when you have admin rights; to run it by hand,
+   once per repo:
 
    ```sh
-   gh api -X PATCH /repos/<owner>/<repo> -f delete_branch_on_merge=true
+   gh api -X PATCH /repos/<owner>/<repo> -F delete_branch_on_merge=true
    ```
 
 2. **Use merge commits or rebase merges, not squashes.** GitHub retargets
@@ -160,10 +162,13 @@ For the auto-retarget to work end to end:
    living in the next PR's branch, so the retargeted PR comes back with
    conflicts you have to rebase out. See [Repo setup](#repo-setup-one-time).
 
-`stackymcstackface` prints a warning at the top of every run if (1) is
-off, so you find out before merging rather than after. (2) is per-merge
-and not detectable from the CLI; pick the right button in the GitHub UI
-or restrict the repo defaults under Settings → General → Pull Requests.
+`stackymcstackface` checks (1) at the top of every run, so you find out
+before merging rather than after. If it is off and you have admin rights
+on the repo, `sms push` offers to enable it for you (and just does so
+under `--yes`); without admin rights it prints the manual command to hand
+to someone who has them. (2) is per-merge and not detectable from the
+CLI; pick the right button in the GitHub UI or restrict the repo defaults
+under Settings → General → Pull Requests.
 
 See [Repo setup](#repo-setup-one-time) and [Merging a stack](#8-merging-a-stack)
 for the details.
@@ -213,10 +218,11 @@ of the workflow that GitHub handles will not work cleanly.
    the merged PR's base.
 
    ```sh
-   gh api -X PATCH /repos/<owner>/<repo> -f delete_branch_on_merge=true
+   gh api -X PATCH /repos/<owner>/<repo> -F delete_branch_on_merge=true
    ```
 
-   Web UI equivalent: Settings → General → Pull Requests →
+   `sms push` offers to do this for you when you have admin rights on the
+   repo. Web UI equivalent: Settings → General → Pull Requests →
    "Automatically delete head branches".
 
 2. **Use merge commits or rebase merges, not squash, for stack PRs.**
