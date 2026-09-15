@@ -10,7 +10,10 @@ use clap::{Parser, Subcommand};
 mod doctor;
 mod gh;
 mod git;
+mod merge;
+mod rebase;
 mod stack;
+mod topology;
 mod ui;
 
 #[derive(Parser, Debug)]
@@ -23,8 +26,9 @@ mod ui;
                   * new branch off an open PR     -- pushes and opens a stacked PR\n  \
                   * new branch off the default    -- pushes and opens a regular PR\n\n\
                   The push goes to the merge-target remote (the repo where the \
-                  PR is created). No local stack state is kept: every invocation \
-                  reconstructs the picture from `git` and `gh`.",
+                  PR is created). Stack topology is discovered from `git` and `gh`; \
+                  rebase keeps only temporary recovery state. Also supports \
+                  whole-stack rebase and guarded bottom-up merge.",
     version
 )]
 struct Cli {
@@ -36,6 +40,10 @@ struct Cli {
 enum Cmd {
     /// Push the current branch (drop-in `git push`); opens a (stacked) PR on first push.
     Push(PushArgs),
+    /// Rebase every branch in the current PR stack, with conflict recovery.
+    Rebase(rebase::Options),
+    /// Merge a fully ready stack bottom-up, stopping safely if requirements change.
+    Merge(merge::Options),
     /// Diagnose whether the environment is set up for `push` (read-only).
     Doctor,
 }
@@ -90,14 +98,17 @@ impl From<PushArgs> for stack::StackOpts {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
-        Cmd::Push(args) => match stack::run(&args.into()) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                ui::print_error(&format!("{e:#}"));
-                ExitCode::from(1)
-            }
-        },
-        Cmd::Doctor => doctor::run(),
+    let result = match cli.command {
+        Cmd::Push(args) => stack::run(&args.into()),
+        Cmd::Rebase(opts) => rebase::run(&opts),
+        Cmd::Merge(opts) => merge::run(&opts),
+        Cmd::Doctor => return doctor::run(),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            ui::print_error(&format!("{e:#}"));
+            ExitCode::from(1)
+        }
     }
 }

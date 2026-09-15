@@ -114,8 +114,8 @@ pub fn repo_info(name_with_owner: Option<&str>) -> Result<RepoInfo> {
     })
 }
 
-/// List open PRs on `repo` (`owner/name`). The list is unbounded: GitHub's
-/// default page size is small enough to surprise us, so request a high cap.
+/// List up to 1000 open PRs on `repo` (`owner/name`). Whole-stack callers
+/// must reject a full result because it may be truncated.
 ///
 /// `--json` fields used:
 /// - `number`              — PR number on the repo
@@ -267,6 +267,168 @@ pub fn set_delete_branch_on_merge(repo: &str) -> Result<()> {
         "-F",
         "delete_branch_on_merge=true",
     ])?;
+    Ok(())
+}
+
+// --- guarded stack merging -------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MergeSettings {
+    pub allow_merge_commit: bool,
+    pub delete_branch_on_merge: bool,
+    pub default_branch: String,
+}
+
+/// REST repo settings, scoped explicitly to GitHub.com for destructive commands.
+pub fn merge_settings(repo: &str) -> Result<MergeSettings> {
+    serde_json::from_str(&run_capture(&[
+        "api",
+        "--hostname",
+        "github.com",
+        &format!("repos/{repo}"),
+    ])?)
+    .context("could not read merge settings")
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergePr {
+    pub number: u64,
+    pub state: String,
+    pub is_draft: bool,
+    pub is_cross_repository: bool,
+    pub head_ref_name: String,
+    pub head_ref_oid: String,
+    pub base_ref_name: String,
+    pub base_ref_oid: String,
+    pub mergeable: String,
+    pub merge_state_status: String,
+    pub review_decision: Option<String>,
+    pub status_check_rollup: Option<Vec<serde_json::Value>>,
+}
+
+/// `--json`: number,state,isDraft,isCrossRepository,headRefName,headRefOid,
+/// baseRefName,baseRefOid,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup.
+pub fn merge_pr(repo: &str, number: u64) -> Result<MergePr> {
+    let json = run_capture(&[
+        "pr",
+        "view",
+        &number.to_string(),
+        "--repo",
+        &format!("https://github.com/{repo}"),
+        "--json",
+        "number,state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup",
+    ])?;
+    serde_json::from_str(&json).context("could not parse merge preflight PR data")
+}
+
+/// Query the same GraphQL queue flags used internally by `gh pr merge`.
+/// These include legacy branch-protection queues as well as ruleset queues.
+pub fn merge_queue(repo: &str, number: u64) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Response {
+        data: Data,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        repository: Repository,
+    }
+    #[derive(Deserialize)]
+    struct Repository {
+        #[serde(rename = "pullRequest")]
+        pull_request: Queue,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Queue {
+        is_merge_queue_enabled: bool,
+        is_in_merge_queue: bool,
+    }
+    let (owner, name) = repo
+        .split_once('/')
+        .context("invalid GitHub repository name")?;
+    let json = run_capture(&[
+        "api",
+        "--hostname",
+        "github.com",
+        "graphql",
+        "-f",
+        "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){isMergeQueueEnabled isInMergeQueue}}}",
+        "-f",
+        &format!("owner={owner}"),
+        "-f",
+        &format!("name={name}"),
+        "-F",
+        &format!("number={number}"),
+    ])?;
+    let response: Response =
+        serde_json::from_str(&json).context("could not verify merge queue policy")?;
+    let queue = response.data.repository.pull_request;
+    Ok(queue.is_merge_queue_enabled || queue.is_in_merge_queue)
+}
+
+/// Percent-encode a single REST path component, including slashes in branch names.
+fn path_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BranchRule {
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+/// Read all active rules for this branch, not just rulesets owned by this repo.
+/// `--paginate --slurp` retains all pages; errors/unknown JSON fail closed.
+pub fn branch_rules(repo: &str, branch: &str) -> Result<Vec<BranchRule>> {
+    let json = run_capture(&[
+        "api",
+        "--hostname",
+        "github.com",
+        "--paginate",
+        "--slurp",
+        &format!(
+            "repos/{repo}/rules/branches/{}?per_page=100",
+            path_component(branch)
+        ),
+    ])?;
+    let pages: Vec<Vec<BranchRule>> =
+        serde_json::from_str(&json).context("could not inspect applicable branch rules")?;
+    Ok(pages.into_iter().flatten().collect())
+}
+
+/// REST merge is immediate or rejected; unlike `gh pr merge`, it never enables
+/// auto-merge or enqueues a PR. GitHub also checks the exact expected head SHA.
+pub fn merge_commit(repo: &str, number: u64, sha: &str) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Response {
+        merged: bool,
+        message: String,
+    }
+    let json = run_capture(&[
+        "api",
+        "--hostname",
+        "github.com",
+        "--method",
+        "PUT",
+        &format!("repos/{repo}/pulls/{number}/merge"),
+        "-f",
+        "merge_method=merge",
+        "-f",
+        &format!("sha={sha}"),
+    ])?;
+    let response: Response = serde_json::from_str(&json).context("uncertain merge response")?;
+    if !response.merged {
+        return Err(anyhow!("GitHub refused merge: {}", response.message));
+    }
     Ok(())
 }
 
