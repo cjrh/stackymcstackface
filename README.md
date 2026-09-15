@@ -5,7 +5,8 @@ first time you push a branch, and stacks the PR correctly when your
 branch descends from another open PR. Uses the official
 [`gh`](https://cli.github.com/) CLI (must be installed).
 
-One subcommand: `push`.
+Four subcommands: `push`, `rebase`, `merge`, and the read-only `doctor`.
+Stacks are discovered from Git and GitHub, not a permanent local database.
 
 `stackymcstackface push` figures out which of three things you meant:
 
@@ -39,9 +40,11 @@ But the process has two fiddly bits that are easy to get wrong:
 2. When you create the PR, you have to pick the right base branch by hand, in the UI:
    the parent branch in the stack, not `main`.
 
-`stackymcstackface` automates exactly those two steps. Reviewing and
-rebasing stay the normal GitHub workflow you already know. So does
-merging, with one prerequisite: when a stack PR merges, GitHub only
+`stackymcstackface push` automates those two steps. `rebase` updates a whole
+linear stack with Git-style conflict recovery; `merge` checks and merges a
+ready stack bottom-up. Reviewing stays on GitHub.
+
+There is one important prerequisite: when a stack PR merges, GitHub only
 auto-retargets the next PR if the merged head branch is deleted through
 GitHub's own merge flow. That means the post-merge "Delete branch"
 button on the PR page, or the repo-level "Automatically delete head
@@ -156,19 +159,15 @@ For the auto-retarget to work end to end:
    gh api -X PATCH /repos/<owner>/<repo> -F delete_branch_on_merge=true
    ```
 
-2. **Use merge commits or rebase merges, not squashes.** GitHub retargets
-   dependents for all three merge methods, but squash creates a new
-   commit on `main` whose content overlaps the original commits still
-   living in the next PR's branch, so the retargeted PR comes back with
-   conflicts you have to rebase out. See [Repo setup](#repo-setup-one-time).
+2. **Use merge commits for stack PRs.** GitHub retargets dependents for all
+   three merge methods, but only merge commits preserve the original
+   commits. Squash and GitHub rebase merges create new SHAs and can require
+   subsequent restacking. `sms merge` deliberately supports merge commits only.
 
-`stackymcstackface` checks (1) at the top of every run, so you find out
-before merging rather than after. If it is off and you have admin rights
-on the repo, `sms push` offers to enable it for you (and just does so
-under `--yes`); without admin rights it prints the manual command to hand
-to someone who has them. (2) is per-merge and not detectable from the
-CLI; pick the right button in the GitHub UI or restrict the repo defaults
-under Settings → General → Pull Requests.
+`sms push` checks (1) and offers to enable it when you have admin rights
+(and does so under `--yes`). Without admin rights it prints the manual
+command to hand to someone who has them. `sms merge` requires both settings
+already enabled; it never changes repository settings.
 
 See [Repo setup](#repo-setup-one-time) and [Merging a stack](#8-merging-a-stack)
 for the details.
@@ -176,7 +175,8 @@ for the details.
 ## Install
 
 Whichever way you install, you also need `git` and a working,
-authenticated `gh` (`gh auth status` should be green).
+authenticated `gh` (`gh auth status` should be green). `rebase` requires
+Git 2.38 or newer. Building from source requires Rust 1.89 or newer.
 
 The easiest install is with
 [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall): it
@@ -225,19 +225,14 @@ of the workflow that GitHub handles will not work cleanly.
    repo. Web UI equivalent: Settings → General → Pull Requests →
    "Automatically delete head branches".
 
-2. **Use merge commits or rebase merges, not squash, for stack PRs.**
-   GitHub auto-retargets dependent PRs the same way for all three
-   merge methods; squash does not break the retarget itself. The
-   problem is what lands on `main`: squash collapses the parent
-   branch's commits into one new commit whose content is the same diff
-   that the next PR's branch *also* still contains as its original,
-   un-squashed commits. After retarget, the next PR's diff against
-   `main` re-litigates those changes against the squash commit, so
-   already-reviewed hunks come back as merge conflicts and you have to
-   rebase to clear them. Merge commits and rebase merges leave the
-   original commits intact on `main`, so the dependent branch lines up
-   cleanly with no rework. Pick per-merge in the GitHub UI, or
-   restrict the repo defaults under Settings → General → Pull Requests.
+2. **Use merge commits for stack PRs.** All three GitHub merge methods
+   support auto-retargeting, but only merge commits leave the original
+   commits intact on `main`. Squash collapses them into a new commit;
+   **GitHub rebase merges always create new SHAs too**, unlike some local
+   `git rebase` operations. Rewritten history can make dependent PRs replay
+   already-reviewed changes or require conflict resolution. `sms merge`
+   uses merge commits exclusively and refuses required merge queues or
+   rules requiring linear history.
 
 3. Optional but recommended: set `git config stack.remote upstream` to
    disambiguate the merge-target remote name. The tool can usually figure
@@ -297,14 +292,18 @@ a terminal. It never fetches, pushes, or mutates anything on GitHub.
 These are the design constraints behind the tool. If you do not share them,
 this tool is probably not for you.
 
-- **No local state.** Other stacking tools maintain a sidecar file
+- **No permanent stack database.** Other stacking tools maintain a sidecar file
   describing the stack and its state. That file rots. Once it disagrees
   with reality on GitHub (which happens *most* once you have five or six
   PRs in a stack), the tooling becomes harder to fix than the manual
   workflow it replaced. Every invocation of `push` reconstructs the
   picture from authoritative sources only: `git fetch`,
   `git merge-base --is-ancestor`, and `gh pr list`. Nothing to keep in
-  sync because there is nothing to sync.
+  sync because there is nothing to sync. A running `rebase` is the narrow
+  exception: a temporary recovery journal and private refs inside Git's
+  metadata preserve original tips and progress, like Git's own rebase state.
+  They are removed on completion or abort. An empty OS-lock file coordinates
+  commands across worktrees; it stores no stack information.
 
 - **Push to the merge-target remote, never anywhere else.** For non-fork
   repos that means `origin`. For forks, it almost always means `upstream`
@@ -317,16 +316,18 @@ this tool is probably not for you.
   before re-pushing to the correct remote and switching the upstream
   tracking ref.
 
-- **Do as little as possible.** One subcommand. Push the branch, open the
-  PR, print the URL. That is the whole tool. There is no `submit-stack`,
-  no `restack`, no `land`, and no merge orchestration; GitHub already does
-  those.
+- **Keep operations explicit.** `push` still pushes one branch without
+  rewriting PR bases. `rebase` is local unless started with `--push`.
+  `merge` requires confirmation (or `--yes`), honors GitHub's requirements,
+  and never enables auto-merge, bypasses a queue, or deletes branches itself.
 
 - **Refuse to act on a dirty repo state.** If the repo is mid-rebase,
   mid-merge, mid-cherry-pick, mid-revert, mid-bisect, or mid-`am`, `push`
   bails and tells you what it found. **Uncommitted changes are fine.** A
   common workflow is to peel one PR at a time off a large set of local
-  changes.
+  changes. In contrast, `rebase` and `merge` require a clean index/worktree,
+  including untracked files. An interrupted stack rebase blocks both `push`
+  and `merge`, even between native Git rebases.
 
 ## Configuration
 
@@ -460,22 +461,108 @@ now be stacked under a new parent, change the base in the GitHub UI (or
 delete the old PR). Keeping `push` from silently mutating PR bases is
 deliberate.
 
-### 8. Merging a stack
+### 7. Rebasing a whole stack
 
-Merge from the bottom up, one PR at a time:
+From **any branch in the stack**, including a middle branch:
 
 ```sh
-gh pr merge 1 --merge   # or use the web UI; do NOT use --squash
+sms rebase          # update every local stack branch onto fetched main
+# Or choose publication at the start:
+sms rebase --push   # rebase, then atomically publish every branch
 ```
 
-With "Automatically delete head branches" enabled (see
-[Repo setup](#repo-setup-one-time)), GitHub deletes #1's head branch as
-part of the merge and retargets the next PR (say, #2) so its base
-becomes `main`. Repeat for #2, then #3, until the stack is empty.
+The first PR is replayed onto the merge target's fetched default branch.
+Each later PR replays only its own commits onto the rewritten parent.
+Unrelated local branches are not moved. Your original checkout is restored
+at the end. Plain `rebase` does not push; afterward you can publish each
+branch with `sms push --force-with-lease` as before. Do not rerun
+`rebase --push` on those unpublished local results: choose `--push` when
+starting the operation, or publish the local-only results per branch.
 
-If you forgot to enable the setting, click the "Delete branch" button
-on the merged PR's page on GitHub. That deletion path also retargets
-dependents.
+On a conflict:
+
+```sh
+# edit conflicted files
+git add <resolved-files>
+sms rebase --continue
+# repeat at later layers if necessary
+# Or abandon the entire operation:
+sms rebase --abort
+```
+
+`--continue` lets Git create the replacement commit. A valid manual
+resolution commit is also accepted. Use the tool's `--abort` for whole-stack
+rollback, not `git rebase --abort` (which only aborts the current layer).
+There is no automatic conflict resolution or tool-level `--skip`.
+
+During replay your original branches stay untouched. Private staging
+branches hold the rewritten commits; all user branch tips are installed
+in one expected-old-value ref transaction only after every layer succeeds.
+Recovery refs retain the originals until cleanup. Git's automatic ref
+updates, autostashing, autosquashing, and rebase hooks are disabled.
+
+With `--push`, publication is **one atomic push with an explicit old-SHA
+lease for each branch**. No branch is pushed during conflicts. If a lease
+fails, none of the stack updates are published. After a rejected or
+uncertain push, the local results and recovery record remain:
+
+- Run `sms rebase --continue` to inspect authoritative remote heads. If all
+  match the intended results, it finishes cleanup without pushing again;
+  if all are still original, it retries the atomic push.
+- `sms rebase --abort` restores original local branches only when the
+  remote is still original. It cannot undo an already-published stack.
+- If remote heads changed independently, coordinate with the other author
+  before recovery. The command refuses to guess or overwrite those changes.
+
+Resume/abort in the original worktree. Do not change stack refs, move to an
+unrelated checkout, start other Git operations, or edit the recovery record
+while it is active. The journal is
+`$(git rev-parse --git-common-dir)/stackymcstackface-rebase.json`.
+A corrupt record, changed refs, or an unprovable interrupted layer fails
+closed and retains recovery data. If you manually aborted the native
+rebase, use `sms rebase --abort`, then start again. Do not delete the journal
+as a shortcut: preserve it and the private refs for manual recovery.
+
+### 8. Merging a stack
+
+```sh
+sms merge --dry-run  # full initial preflight; no GitHub mutations
+sms merge           # show plan, check all layers, ask for confirmation
+sms merge --yes     # same checks, without the prompt
+```
+
+This selects the full linear stack, checks every PR against its current
+base before merging anything, then merges bottom-up using merge commits.
+Every local tip must match the fetched and GitHub PR heads. Drafts,
+conflicts, unapproved required reviews, unknown/pending/failed checks,
+non-clean GitHub merge states, and merge queues block the command. Checks
+are conservative: even a failing optional reported check blocks it. The
+command reads active branch rules and GitHub's aggregate merge readiness;
+it fails if those APIs cannot establish readiness. GitHub remains the
+final authority on permissions and branch requirements.
+
+With "Automatically delete head branches" enabled, GitHub deletes the
+merged head and retargets the next PR to the default branch. The command
+briefly polls for retargeting/mergeability, then checks settings, rules,
+heads, bases, and readiness again before the next merge. Each API merge
+pins the expected head SHA, and the PR's merged state is confirmed afterward.
+It never queues PRs, enables auto-merge, or attempts an admin override.
+
+**This is not an atomic multi-PR transaction.** Retargeting can rerun CI,
+dismiss approvals, or apply different default-branch rules. Initial checks
+cannot guarantee those future requirements. If a later layer is blocked,
+the command stops and reports confirmed merges and remaining/unconfirmed
+PRs. Already-merged PRs are not rolled back. Inspect GitHub, wait for or
+satisfy the remaining requirements, check out a remaining branch, then
+rerun `sms merge`. Do not concurrently edit the stack while it runs.
+GitHub has no expected-base-SHA merge transaction, so a target/rule change
+between the final check and the server operation cannot be eliminated.
+
+Merging only the top PR is deliberately not used as an optimization:
+GitHub can mark ancestor PRs indirectly merged even when their own rules
+were not satisfied. Manual bottom-up `gh pr merge <number> --merge` remains
+available. If automatic deletion was disabled for a manual merge, use the
+GitHub PR page's "Delete branch" button to trigger retargeting.
 
 What you must **not** do: clean up merged head branches with
 `git push --delete origin <branch>` or low-level `gh api` ref deletes.
@@ -497,6 +584,30 @@ branch and reopen the PR to recover.
 - current branch shares no history with the default branch (so there is no
   sensible base to pick)
 
+### Whole-stack limitations (first version)
+
+`rebase` and `merge` require an unambiguous **linear chain of same-repo open
+PRs rooted at the default branch**, with all stack branches already present
+locally and synchronized with GitHub (publish local commits first). PR bases
+identify the chain; every parent tip must be an ancestor of its child.
+Cycles, duplicate heads, branching stacks, symbolic branch refs, shallow
+history, replacement refs, grafts, missing refs, and empty layers are refused. `merge` also rejects
+open ancestor PRs outside the selected chain, including equal-SHA aliases.
+Correct their PR bases first; they must not bypass checks through an
+indirect merge. Discovery fails closed at the 1000-open-PR cap instead of
+silently omitting possible dependents.
+
+New destructive commands support GitHub.com remotes with exactly one
+fetch URL and one push URL, both identifying the merge-target repository.
+`stack.remote` cannot bypass this check. Enterprise hosts and multiple push
+URLs are not supported yet. `rebase` additionally refuses merge commits in
+replayed history and any stack branch checked out in another worktree.
+`merge` requires clean worktrees for all checked-out stack branches. It
+requires merge commits and automatic head deletion already enabled, no
+required merge queue, and access to the applicable-rules APIs. Large check
+rollups that might be truncated are refused. Ordinary `push` retains its
+existing single-branch behavior and tolerance of uncommitted changes.
+
 ## Flags
 
 ```text
@@ -515,6 +626,21 @@ sms push [OPTIONS]
   -v, --verbose           Show raw git output for fetch/push instead of
                           hiding it behind a spinner. Repeat (-vv) to also
                           pass git its own --verbose.
+```
+
+```text
+sms rebase [--push]
+sms rebase --continue
+sms rebase --abort
+
+      --push       Publish the entire completed stack atomically with leases.
+      --continue   Resume the original operation (remembers its --push choice).
+      --abort      Abort the entire operation, guarding original branch tips.
+
+sms merge [OPTIONS]
+
+  -y, --yes        Confirm the irreversible bottom-up merge without a prompt.
+      --dry-run    Check the full stack and print its plan; never merge.
 ```
 
 By default `push` groups its work into a `PLAN` section (what it will do)
@@ -553,9 +679,10 @@ These are explicitly out of scope and unlikely to ever be added:
 
 - A stack overview or visualisation command. `gh pr list` already shows it.
 - A "submit the whole stack" command. `sms push` per branch is plenty.
-- Auto-merging, auto-rebasing, conflict resolution, or any other workflow
-  orchestration.
-- A local stack-state file of any kind. See "Design requirements".
+- Background auto-merging/rebasing, merge-queue orchestration, or automatic
+  conflict resolution. Explicit `rebase` and `merge` are supported.
+- A permanent local stack database. Temporary rebase recovery metadata is
+  the only stack-state exception. See "Design requirements".
 
 ## Further reading
 
