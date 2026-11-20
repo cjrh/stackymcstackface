@@ -6,8 +6,11 @@
 //! and makes it possible to swap implementations later (e.g., libgit2) without
 //! touching callers.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -177,10 +180,15 @@ pub fn commits_between(from: &str, to: &str) -> Result<usize> {
         .with_context(|| format!("could not parse commit count from {out:?}"))
 }
 
-/// Resolve a revision to a SHA, returning `None` if it doesn't exist locally.
+/// Resolve an existing commit, not just a syntactically valid SHA.
 pub fn resolve(rev: &str) -> Result<Option<String>> {
     let output = Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", rev])
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ])
         .output()
         .context("failed to invoke git rev-parse")?;
     if output.status.success() {
@@ -246,10 +254,471 @@ pub fn config_get(key: &str) -> Result<Option<String>> {
     }
 }
 
+// --- whole-stack operations -------------------------------------------------
+
+/// Absolute, worktree-specific Git metadata directory.
+pub fn git_dir() -> Result<PathBuf> {
+    Ok(PathBuf::from(run(&["rev-parse", "--absolute-git-dir"])?))
+}
+
+pub fn worktree_in_progress(path: &Path) -> Result<Option<InProgress>> {
+    Ok(detect_in_progress(&worktree_git_dir(path)?))
+}
+
+/// Git detaches HEAD during rebase and bisect, but those operations still
+/// reserve the starting branch for their eventual checkout or ref update.
+fn detached_worktree_branch(path: &Path) -> Result<Option<String>> {
+    let dir = worktree_git_dir(path)?;
+    for state in [
+        "rebase-merge/head-name",
+        "rebase-apply/head-name",
+        "BISECT_START",
+    ] {
+        let file = dir.join(state);
+        let value = match std::fs::read_to_string(&file) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("could not read {}", file.display()));
+            }
+        };
+        let branch = value.trim_end_matches(['\r', '\n']);
+        if state == "BISECT_START" {
+            return Ok(Some(format!("refs/heads/{branch}")));
+        }
+        return Ok(branch.starts_with("refs/heads/").then(|| branch.to_owned()));
+    }
+    Ok(None)
+}
+
+pub fn worktree_git_dir(path: &Path) -> Result<PathBuf> {
+    Ok(PathBuf::from(run(&[
+        "-C",
+        path.to_str().context("non-UTF-8 worktree path")?,
+        "rev-parse",
+        "--absolute-git-dir",
+    ])?))
+}
+
+/// Absolute shared metadata directory (also shared by linked worktrees).
+pub fn common_dir() -> Result<PathBuf> {
+    Ok(PathBuf::from(run(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ])?))
+}
+
+/// All effective fetch or push URLs, including Git's URL rewrites.
+pub fn remote_urls(remote: &str, push: bool) -> Result<Vec<String>> {
+    let mut args = vec!["remote", "get-url", "--all"];
+    if push {
+        args.push("--push");
+    }
+    args.push(remote);
+    Ok(run(&args)?.lines().map(str::to_owned).collect())
+}
+
+/// Refuse fetch destinations that redirect updates outside their named refs.
+pub fn check_fetch_refs(remote: &str) -> Result<()> {
+    let prefix = format!("refs/remotes/{remote}/");
+    let refs = run(&["for-each-ref", "--format=%(refname) %(symref)", &prefix])?;
+    for line in refs.lines() {
+        if let Some((name, target)) = line.split_once(' ')
+            && !target.is_empty()
+            && name != format!("{prefix}HEAD")
+        {
+            bail!(
+                "symbolic fetch destination `{name}` is not supported; no referent will be updated"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Fetch only remote-tracking heads, regardless of configured ref/tag mappings.
+/// HEAD is a conventional symbolic remote alias, never a writable destination.
+pub fn fetch_heads(remote: &str) -> Result<()> {
+    run(&[
+        "fetch",
+        "--prune",
+        "--no-prune-tags",
+        "--no-tags",
+        "--refmap=",
+        "--recurse-submodules=no",
+        remote,
+        &format!("+refs/heads/*:refs/remotes/{remote}/*"),
+        "^refs/heads/HEAD",
+    ])
+    .map(|_| ())
+}
+
+/// True when tracked, staged, and untracked files are all clean.
+pub fn is_clean(path: &Path) -> Result<bool> {
+    Ok(run(&[
+        "-C",
+        path.to_str().context("non-UTF-8 worktree path")?,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    ])?
+    .is_empty())
+}
+
+#[derive(Debug)]
+pub struct Worktree {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+}
+
+/// `git worktree list --porcelain -z`, preserving paths containing spaces.
+pub fn worktrees() -> Result<Vec<Worktree>> {
+    let output = run(&["worktree", "list", "--porcelain", "-z"])?;
+    let mut result = Vec::new();
+    for record in output.split("\0\0") {
+        let mut path = None;
+        let mut branch = None;
+        let mut detached = false;
+        for field in record.split('\0') {
+            if let Some(p) = field.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(p));
+            }
+            if let Some(b) = field.strip_prefix("branch ") {
+                branch = Some(b.to_owned());
+            }
+            detached |= field == "detached";
+        }
+        if let Some(path) = path {
+            if detached {
+                branch = detached_worktree_branch(&path)?;
+            }
+            result.push(Worktree { path, branch });
+        }
+    }
+    Ok(result)
+}
+
+pub fn merge_base(a: &str, b: &str) -> Result<String> {
+    let bases = run(&["merge-base", "--all", a, b])?;
+    if bases.lines().count() != 1 {
+        bail!("history has no unique merge base");
+    }
+    Ok(bases)
+}
+
+pub fn has_merges(base: &str, tip: &str) -> Result<bool> {
+    Ok(!run(&["rev-list", "--merges", &format!("{base}..{tip}")])?.is_empty())
+}
+
+pub fn check_branch(branch: &str) -> Result<()> {
+    run(&["check-ref-format", "--branch", branch]).map(|_| ())
+}
+
+/// Symbolic refs can resolve to the expected SHA but name a different branch.
+pub fn require_direct_ref(name: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--quiet", name])
+        .output()
+        .context("could not inspect ref identity")?;
+    match output.status.code() {
+        Some(0) => bail!("symbolic ref `{name}` is not supported; no referent will be updated"),
+        Some(1) => Ok(()),
+        _ => bail!("could not verify direct ref `{name}`"),
+    }
+}
+
+/// An incomplete or locally replaced graph cannot prove safe ancestry.
+pub fn require_full_history() -> Result<()> {
+    if run(&["rev-parse", "--is-shallow-repository"])? != "false" {
+        bail!("shallow history is not supported; fetch the full history before rebase/merge");
+    }
+    if !run(&["for-each-ref", "--format=%(refname)", "refs/replace/"])?.is_empty()
+        || common_dir()?.join("info/grafts").exists()
+    {
+        bail!(
+            "replacement refs or grafts are not supported; use the original commit graph for rebase/merge"
+        );
+    }
+    Ok(())
+}
+
+/// Update refs together with expected old values. Each tuple is (ref, new, old).
+/// An empty new value deletes the ref; an empty old value requires it absent.
+pub fn update_refs(updates: &[(String, String, String)]) -> Result<()> {
+    for (name, _, _) in updates {
+        require_direct_ref(name)?;
+    }
+    let mut child = Command::new("git")
+        .args(["update-ref", "--no-deref", "--create-reflog", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut input = String::from("start\n");
+    for (name, new, old) in updates {
+        if new.is_empty() {
+            input.push_str(&format!("delete {name} {old}\n"));
+        } else if old.is_empty() {
+            input.push_str(&format!("create {name} {new}\n"));
+        } else {
+            input.push_str(&format!("update {name} {new} {old}\n"));
+        }
+    }
+    input.push_str("prepare\ncommit\n");
+    child
+        .stdin
+        .take()
+        .context("git stdin unavailable")?
+        .write_all(input.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!(
+            "ref transaction failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Switch only to an existing local branch. Never guess a remote, detach,
+/// reset a branch, or discard worktree changes.
+pub fn switch_local(branch: &str) -> Result<()> {
+    check_branch(branch)?;
+    let reference = format!("refs/heads/{branch}");
+    require_direct_ref(&reference)?;
+    if resolve(&reference)?.is_none() {
+        bail!("branch `{branch}` is not available locally; fetch and create it before navigating");
+    }
+    run(&[
+        "switch",
+        "--no-guess",
+        "--no-overwrite-ignore",
+        "--",
+        branch,
+    ])
+    .map(|_| ())
+}
+
+pub fn checkout(branch: &str) -> Result<()> {
+    run(&["checkout", "--no-guess", "--no-overwrite-ignore", branch]).map(|_| ())
+}
+
+pub fn detach() -> Result<()> {
+    run(&["checkout", "--detach", "--no-overwrite-ignore"]).map(|_| ())
+}
+
+/// Native rebase does not offer checkout's --no-overwrite-ignore. Check the
+/// reset destination and the paths that its commit replay may write.
+pub fn check_rebase_paths(target: &str, replay: Option<(&str, &str)>) -> Result<()> {
+    // Include ignored paths and paths that a replayed commit could make ignored.
+    let untracked = run_raw(&["ls-files", "--full-name", "--others", "-z", "--", ":/"])?;
+    if untracked.is_empty() {
+        return Ok(());
+    }
+
+    let ignore_case = config_get("core.ignorecase")?.is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "" | "true" | "yes" | "on" | "1"
+        )
+    });
+    let normalize = |mut paths: Vec<u8>| {
+        if ignore_case {
+            paths.make_ascii_lowercase();
+        }
+        paths
+    };
+    let tree = normalize(run_raw(&[
+        "ls-tree",
+        "--full-tree",
+        "-r",
+        "--name-only",
+        "-z",
+        target,
+    ])?);
+    let mut candidates: BTreeSet<_> = nul_fields(&tree).collect();
+
+    let mut changes = Vec::new();
+    if let Some((boundary, tip)) = replay {
+        changes = run_raw(&[
+            "diff",
+            "--name-status",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            "--no-relative",
+            "-z",
+            boundary,
+            target,
+            "--",
+        ])?;
+        changes.extend(run_raw(&[
+            "log",
+            "--format=",
+            "--name-status",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-show-signature",
+            "--no-renames",
+            "--no-relative",
+            "-z",
+            &format!("{boundary}..{tip}"),
+            "--",
+        ])?);
+    }
+    let changes = normalize(changes);
+    let mut paths = nul_fields(&changes);
+    let mut changed_roots = BTreeSet::new();
+    let mut may_relocate = false;
+    while let Some(status) = paths.next() {
+        let path = paths.next().context("missing path in Git diff output")?;
+        candidates.insert(path);
+        changed_roots.insert(top_level(path));
+        may_relocate |= status.eq_ignore_ascii_case(b"D");
+    }
+    for original in nul_fields(&untracked) {
+        let path = normalize(original.strip_suffix(b"/").unwrap_or(original).to_vec());
+        let root = top_level(&path);
+        // A directory rename can send incoming paths to a different directory
+        // under a changed root. Err on the side of preserving files there.
+        let relocated = may_relocate
+            && (changed_roots.contains(root)
+                || root
+                    .iter()
+                    .enumerate()
+                    .any(|(end, &byte)| byte == b'~' && changed_roots.contains(&root[..end])));
+        if relocated || path_overlaps(&candidates, &path, replay.is_some()) {
+            bail!(
+                "Git rebase could overwrite an untracked or ignored local path {:?}; move it aside before retrying",
+                String::from_utf8_lossy(original)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn nul_fields(output: &[u8]) -> impl Iterator<Item = &[u8]> {
+    output
+        .split(|&byte| byte == 0)
+        .filter(|field| !field.is_empty())
+}
+
+fn top_level(path: &[u8]) -> &[u8] {
+    path.split(|&byte| byte == b'/').next().unwrap_or_default()
+}
+
+fn path_overlaps(candidates: &BTreeSet<&[u8]>, path: &[u8], replay: bool) -> bool {
+    // A tracked file may replace a directory or vice versa. Replay can also
+    // write conflict files with a "~<side>" suffix.
+    let mut descendants = path.to_vec();
+    descendants.push(b'/');
+    candidates.contains(path)
+        || candidates
+            .range(descendants.as_slice()..)
+            .next()
+            .is_some_and(|entry| entry.starts_with(&descendants))
+        || path.iter().enumerate().any(|(end, &byte)| {
+            (byte == b'/' || (replay && byte == b'~')) && candidates.contains(&path[..end])
+        })
+}
+
+/// Rebase a private branch, retaining empty commits and recording a checkpoint
+/// after every replayed commit. No unrelated refs or autostashes are allowed.
+pub fn rebase_layer(branch: &str, boundary: &str, onto: &str, checkpoint: &str) -> Result<()> {
+    run_inherit(&[
+        "-c",
+        "rebase.updateRefs=false",
+        "-c",
+        "rebase.autoStash=false",
+        "-c",
+        "rebase.autoSquash=false",
+        "-c",
+        "rebase.abbreviateCommands=false",
+        "-c",
+        "rebase.instructionFormat=%s",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "rebase",
+        "--merge",
+        "--no-update-refs",
+        "--no-autostash",
+        "--no-autosquash",
+        "--no-rebase-merges",
+        "--no-fork-point",
+        "--force-rebase",
+        "--reapply-cherry-picks",
+        "--empty=keep",
+        "--keep-empty",
+        "--onto",
+        onto,
+        "--exec",
+        &format!("git update-ref --no-deref {checkpoint} HEAD"),
+        boundary,
+        branch,
+    ])
+}
+
+pub fn rebase_continue() -> Result<()> {
+    let status = Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "rebase.updateRefs=false",
+            "-c",
+            "rebase.autoStash=false",
+            "rebase",
+            "--continue",
+        ])
+        .env("GIT_EDITOR", "true")
+        .status()?;
+    if !status.success() {
+        bail!("git rebase --continue stopped");
+    }
+    Ok(())
+}
+
+pub fn rebase_abort() -> Result<()> {
+    run_inherit(&["-c", "core.hooksPath=/dev/null", "rebase", "--abort"])
+}
+
+/// Publish all heads or none; explicit leases cannot be weakened by background fetches.
+pub fn push_stack(remote: &str, branches: &[(String, String, String)]) -> Result<()> {
+    let mut args = vec![
+        "push".to_owned(),
+        "--atomic".to_owned(),
+        "--no-follow-tags".to_owned(),
+        "--recurse-submodules=no".to_owned(),
+    ];
+    for (branch, _, old) in branches {
+        args.push(format!("--force-with-lease=refs/heads/{branch}:{old}"));
+    }
+    args.push(remote.to_owned());
+    for (branch, new, _) in branches {
+        args.push(format!("{new}:refs/heads/{branch}"));
+    }
+    run(&args.iter().map(String::as_str).collect::<Vec<_>>()).map(|_| ())
+}
+
+/// Read authoritative remote heads, including after an uncertain push result.
+pub fn remote_heads(remote: &str) -> Result<std::collections::BTreeMap<String, String>> {
+    let text = run(&["ls-remote", "--heads", remote])?;
+    text.lines()
+        .map(|line| {
+            let (sha, name) = line.split_once('\t').context("invalid ls-remote output")?;
+            Ok((name.to_owned(), sha.to_owned()))
+        })
+        .collect()
+}
+
 // --- internals --------------------------------------------------------------
 
 /// Capture stdout of `git <args>` as a trimmed string, erroring on non-zero.
 fn run(args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8_lossy(&run_raw(args)?).trim().to_string())
+}
+
+fn run_raw(args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .args(args)
         .output()
@@ -258,7 +727,7 @@ fn run(args: &[&str]) -> Result<String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("git {} failed: {}", args.join(" "), stderr.trim()));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(output.stdout)
 }
 
 /// Run `git <args>`, dispatching on the requested output handling. `Quiet`

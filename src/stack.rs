@@ -45,6 +45,8 @@ pub struct StackOpts {
 }
 
 pub fn run(opts: &StackOpts) -> Result<()> {
+    let _lock = crate::topology::lock()?;
+    crate::topology::no_rebase()?;
     let console = Console::detect();
     console.banner();
 

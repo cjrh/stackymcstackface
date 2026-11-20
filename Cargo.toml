@@ -2,6 +2,7 @@
 name = "stackymcstackface"
 version = "0.7.0"
 edition = "2024"
+rust-version = "1.89"
 license = "GPL-3.0-or-later"
 
 [[bin]]
