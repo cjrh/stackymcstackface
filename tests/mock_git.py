@@ -11,6 +11,8 @@ real = os.environ['REAL_GIT']
 root = pathlib.Path(os.environ['MOCK_REPO'])
 state_path = root / '.git' / 'mock-gh.json'
 state = json.loads(state_path.read_text())
+with (root / '.git' / 'mock-git.log').open('a') as log:
+    log.write(json.dumps(args) + '\n')
 if args[:2] == ['remote', 'get-url']:
     print('https://github.com/other/repo' if state.get('wrong_push_url') and '--push' in args else 'https://github.com/owner/repo')
     sys.exit(0)

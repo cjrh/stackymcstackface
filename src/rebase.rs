@@ -441,6 +441,8 @@ fn resume(j: &mut Journal, path: &Path, console: &Console) -> Result<()> {
                     continue;
                 }
                 let branch = j.stage(index).trim_start_matches("refs/heads/").to_owned();
+                let layer = &j.entries[index].layer;
+                git::check_rebase_paths(&onto, Some((&layer.boundary, &layer.old)))?;
                 git::checkout(&branch)?;
                 j.phase = Phase::Replaying {
                     index,
@@ -458,6 +460,8 @@ fn resume(j: &mut Journal, path: &Path, console: &Console) -> Result<()> {
             Phase::Replaying { index, onto } => {
                 let (index, onto) = (*index, onto.clone());
                 if j.native_rebase(index, &onto)? {
+                    let layer = &j.entries[index].layer;
+                    git::check_rebase_paths(&onto, Some((&layer.boundary, &layer.old)))?;
                     git::rebase_continue().context("resolve conflicts and stage with `git add`, then retry `rebase --continue`; or use `rebase --abort`")?;
                 }
                 j.accept_result(index, &onto, path)?;
@@ -546,6 +550,7 @@ fn abort(j: &mut Journal, path: &Path, console: &Console) -> Result<()> {
     }
     if let Phase::Replaying { index, onto } = &j.phase {
         if j.native_rebase(*index, onto)? {
+            git::check_rebase_paths(&j.entries[*index].layer.old, None)?;
             git::rebase_abort()?;
         }
     } else if git::read_state()?.in_progress.is_some() {

@@ -5,7 +5,8 @@ first time you push a branch, and stacks the PR correctly when your
 branch descends from another open PR. Uses the official
 [`gh`](https://cli.github.com/) CLI (must be installed).
 
-Four subcommands: `push`, `rebase`, `merge`, and the read-only `doctor`.
+Eight subcommands: `push`, `rebase`, `merge`, `view`, `up`, `down`, `jump`,
+and `doctor`. `view` and `doctor` are read-only.
 Stacks are discovered from Git and GitHub, not a permanent local database.
 
 `stackymcstackface push` figures out which of three things you meant:
@@ -42,7 +43,8 @@ But the process has two fiddly bits that are easy to get wrong:
 
 `stackymcstackface push` automates those two steps. `rebase` updates a whole
 linear stack with Git-style conflict recovery; `merge` checks and merges a
-ready stack bottom-up. Reviewing stays on GitHub.
+ready stack bottom-up. `view` shows the stack; `up`, `down`, and `jump`
+switch between its local branches. Reviewing stays on GitHub.
 
 There is one important prerequisite: when a stack PR merges, GitHub only
 auto-retargets the next PR if the merged head branch is deleted through
@@ -500,6 +502,8 @@ branches hold the rewritten commits; all user branch tips are installed
 in one expected-old-value ref transaction only after every layer succeeds.
 Recovery refs retain the originals until cleanup. Git's automatic ref
 updates, autostashing, autosquashing, and rebase hooks are disabled.
+If Git could overwrite an ignored local file during replay or checkout,
+move the file aside and run `sms rebase --continue`.
 
 With `--push`, publication is **one atomic push with an explicit old-SHA
 lease for each branch**. No branch is pushed during conflicts. If a lease
@@ -540,6 +544,7 @@ are conservative: even a failing optional reported check blocks it. The
 command reads active branch rules and GitHub's aggregate merge readiness;
 it fails if those APIs cannot establish readiness. GitHub remains the
 final authority on permissions and branch requirements.
+The command rechecks every layer after confirmation, before the first merge.
 
 With "Automatically delete head branches" enabled, GitHub deletes the
 merged head and retargets the next PR to the default branch. The command
@@ -570,7 +575,104 @@ Those bypass GitHub's retarget logic; the next PR in the stack will be
 **closed**, not retargeted, and you will have to restore the deleted
 branch and reopen the PR to recover.
 
-### 9. Bail conditions
+### 9. Viewing and navigating a stack
+
+From any open PR branch:
+
+```sh
+sms view       # show the current stack, including sibling PRs
+sms up         # switch to the next (child) PR branch
+sms down       # switch to the prior (parent) PR branch
+sms jump 422   # switch to the branch for PR #422 shown by view
+```
+
+Example after the first PR has merged:
+
+```text
+octocat/widgets · current feat/tests · default main
+
+ACTIVE STACK (current PR bases)
+
+#422 [OPEN] feat/tests — Add tests  <- current
+base: main · merge: no conflicts · GitHub: behind base · reviews: approved
+
+#423 [DRAFT] feat/docs — Document the parser
+base: #422 (feat/tests) · merge: no conflicts · GitHub: draft · reviews: no decision
+
+HISTORY (explicit footers, not current bases)
+#421 [MERGED] feat/parser — Add parser
+#422 previously stacked on #421
+
+Use `jump <PR number>` to switch to an existing local branch.
+```
+
+Numbers are **GitHub PR numbers**, not row positions. They do not change
+when another PR merges. States are `OPEN`, `DRAFT`, `MERGED`, and `CLOSED`.
+The list stays flat at any depth. Each active PR names its current base,
+including the parent PR number when present. PR numbers are bold cyan;
+branch names are magenta. Color is disabled when piped or when `NO_COLOR`
+is set.
+
+Each active PR also shows three GitHub summaries:
+
+- **merge:** no conflicts, conflicts, or unknown. No conflicts does not
+  mean the PR is ready to merge.
+- **GitHub:** the aggregate merge state, such as behind base, blocked,
+  clean, draft, or checks not passing. `behind base` means GitHub reported
+  `BEHIND`. Other states do not prove that the branch contains every base
+  commit; this command does not run a separate ancestry comparison.
+- **reviews:** approved, changes requested, required, or no decision.
+  This is GitHub's aggregate review decision, not a count of reviewers.
+  No decision does not mean approval or that no reviews exist.
+
+Missing or pending merge information is shown as unknown. These are
+snapshots, not a replacement for the full checks performed by `sms merge`.
+
+- On the default branch, `view` lists all active stacks. Use `jump` to
+  enter one. From a PR branch, it shows only that stack and linked history.
+- `up` and `down` follow **current PR bases**, not historical footers.
+  At either end they report that no next/prior PR exists. With multiple
+  children, `up` lists their numbers and requires an explicit `jump`.
+- `jump` accepts only PRs in the current view, including historical PRs.
+  A historical branch must still have the PR's head commit and must not
+  be reused by an open PR. Otherwise the command refuses to switch.
+- Branches must already exist locally. There is no automatic Git fetch,
+  branch creation, reset, forced checkout, or stash. Git preserves local
+  edits when possible and refuses switches that would overwrite edits or
+  ignored local files. It also refuses to enter a branch in use by another
+  worktree.
+- Navigation refuses an unfinished Git operation or stack rebase. `view`
+  remains read-only. Detached HEAD and branches without a PR are not
+  supported; check out a PR branch or the default branch first.
+
+**Discovery and cost.** The commands list same-repository open PRs and
+match head/base names in memory. No ancestry checks or Git fetch are
+needed. GitHub CLI paginates the list; a result of 1000 PRs is refused
+because it could be incomplete. Fork PRs are excluded. Duplicate heads
+and cycles in the selected active stack are refused; branching stacks
+are supported for viewing and navigation.
+
+`up` and `down` request metadata only. `view` adds `mergeable`,
+`mergeStateStatus`, and `reviewDecision` to the existing list request;
+there are no per-PR status requests. Navigation does not request these
+status fields. `view` and `jump` also request PR bodies in that list to
+find explicit `Stacked on #N` footers. They fetch
+only referenced historical PRs, once per number per invocation, with a
+limit of 100 additional lookups. Missing, inaccessible, cyclic, or excess
+history links produce warnings without hiding the active stack. No
+permanent cache is written.
+
+**History is partial.** GitHub retargeting removes old base links. The
+footer written by `push` can preserve them; a standalone `Stacked on #N`
+line also works. Footers never override current links between open PRs.
+Merged/closed parents appear separately, and open PRs with the same
+explicit historical parent can appear as separate active roots in one
+view. No age cutoff is needed because there is no broad closed-PR scan.
+Closed descendants without a reachable link are not discovered. On a
+closed PR branch, discovery uses an exact-head lookup and refuses
+ambiguous branch reuse.
+
+### 10. Bail conditions
 
 `push` refuses to run, with a clear message, in any of these states:
 
@@ -601,7 +703,8 @@ New destructive commands support GitHub.com remotes with exactly one
 fetch URL and one push URL, both identifying the merge-target repository.
 `stack.remote` cannot bypass this check. Enterprise hosts and multiple push
 URLs are not supported yet. `rebase` additionally refuses merge commits in
-replayed history and any stack branch checked out in another worktree.
+replayed history and any stack branch in use by another worktree, including
+one paused in a native rebase or bisect.
 `merge` requires clean worktrees for all checked-out stack branches. It
 requires merge commits and automatic head deletion already enabled, no
 required merge queue, and access to the applicable-rules APIs. Large check
@@ -641,6 +744,11 @@ sms merge [OPTIONS]
 
   -y, --yes        Confirm the irreversible bottom-up merge without a prompt.
       --dry-run    Check the full stack and print its plan; never merge.
+
+sms view           Show active PR bases and explicitly linked history.
+sms up             Switch to the child PR branch; refuse multiple choices.
+sms down           Switch to the parent PR branch.
+sms jump <NUMBER>  Switch by the GitHub PR number shown in view.
 ```
 
 By default `push` groups its work into a `PLAN` section (what it will do)
@@ -677,7 +785,6 @@ You can read the same algorithm directly in
 
 These are explicitly out of scope and unlikely to ever be added:
 
-- A stack overview or visualisation command. `gh pr list` already shows it.
 - A "submit the whole stack" command. `sms push` per branch is plenty.
 - Background auto-merging/rebasing, merge-queue orchestration, or automatic
   conflict resolution. Explicit `rebase` and `merge` are supported.

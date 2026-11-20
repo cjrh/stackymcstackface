@@ -21,6 +21,10 @@ def save():
 
 def current(pr):
     pr = dict(pr)
+    pr.setdefault('title', 'PR ' + str(pr['number']))
+    pr.setdefault('body', '')
+    pr.setdefault('isDraft', state.get('draft') == pr['number'])
+    pr.setdefault('state', 'MERGED' if pr['number'] in state['merged'] else 'OPEN')
     merged_heads = {p['headRefName'] for p in state['prs'] if p['number'] in state['merged']}
     if pr['baseRefName'] in merged_heads:
         pr['baseRefName'] = 'main'
@@ -30,7 +34,10 @@ if args[:2] == ['repo', 'view']:
     emit({'nameWithOwner':'owner/repo','defaultBranchRef':{'name':'main'},'isFork':False,
           'parent':None,'deleteBranchOnMerge':True,'viewerPermission':'WRITE'})
 if args[:2] == ['pr', 'list']:
-    result = [current(p) for p in state['prs'] if p['number'] not in state['merged']]
+    all_states = args[args.index('--state') + 1] == 'all'
+    result = [current(p) for p in state['prs'] if all_states or current(p)['state'] == 'OPEN']
+    if '--head' in args:
+        result = [p for p in result if p['headRefName'] == args[args.index('--head') + 1]]
     if state.get('late_alias_after'):
         state['list_calls'] = state.get('list_calls', 0) + 1
         save()
@@ -44,7 +51,14 @@ if args[:2] == ['pr', 'list']:
     emit(result)
 if args[:2] == ['pr', 'view']:
     number = int(args[2])
-    pr = current(next(p for p in state['prs'] if p['number'] == number))
+    if state.get('unavailable') == number:
+        sys.exit('PR unavailable')
+    found = next((p for p in state['prs'] if p['number'] == number), None)
+    if found is None:
+        sys.exit('PR not found')
+    pr = current(found)
+    if 'mergeable' not in args[args.index('--json') + 1].split(','):
+        emit(pr)
     base_oid = state['base'] if pr['baseRefName'] == 'main' else next(p['headRefOid'] for p in state['prs'] if p['headRefName'] == pr['baseRefName'])
     blocked = state.get('blocked') == number or (state.get('partial_block') == number and state['merged'])
     pr.update({'state':'MERGED' if number in state['merged'] else 'OPEN',
@@ -55,6 +69,9 @@ if args[:2] == ['pr', 'view']:
         pr['statusCheckRollup'] = [{'__typename':'CheckRun','status':'COMPLETED','conclusion':'FAILURE'}]
     if state.get('changed_head') == number:
         pr['headRefOid'] = 'f' * 40
+    if state.get('draft_after_first_read') == number:
+        state['draft'] = number
+        save()
     emit(pr)
 if args[0] == 'api':
     if 'graphql' in args:

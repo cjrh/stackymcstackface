@@ -36,6 +36,22 @@ impl Palette {
         self.maybe(Style::new().fg_color(Some(Color::Ansi(c))))
     }
 
+    #[cfg(test)]
+    pub fn for_test(enabled: bool) -> Self {
+        Self { enabled }
+    }
+
+    pub fn pr_number(&self) -> Style {
+        self.maybe(
+            Style::new()
+                .bold()
+                .fg_color(Some(Color::Ansi(AnsiColor::Cyan))),
+        )
+    }
+    pub fn branch(&self) -> Style {
+        self.ansi(AnsiColor::Magenta)
+    }
+
     pub fn green(&self) -> Style {
         self.ansi(AnsiColor::Green)
     }
@@ -51,6 +67,11 @@ impl Palette {
     pub fn dim(&self) -> Style {
         self.maybe(Style::new().dimmed())
     }
+}
+
+/// Format a text span without exposing ANSI escapes to presentation callers.
+pub fn styled(text: &str, style: Style) -> String {
+    format!("{}{text}{}", style.render(), style.render_reset())
 }
 
 /// High-level console for the `push` command. Groups output into sections and

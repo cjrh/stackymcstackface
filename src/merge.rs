@@ -203,6 +203,23 @@ fn confirmed_merged(repo: &str, layer: &topology::Layer) -> Result<()> {
     )
 }
 
+fn check_stack_readiness(stack: &topology::Stack) -> Result<()> {
+    for (i, layer) in stack.layers.iter().enumerate() {
+        let (base, expected_base) = match i.checked_sub(1) {
+            Some(parent) => (&stack.layers[parent].branch, &stack.layers[parent].old),
+            None => (&stack.target.default_branch, &stack.base),
+        };
+        let pr = ready_pr(&stack.target.name_with_owner, layer, base, None)?;
+        if &pr.base_ref_oid != expected_base {
+            bail!(
+                "PR #{} base head changed since fetch; rerun preflight",
+                layer.number
+            );
+        }
+    }
+    Ok(())
+}
+
 fn execute(stack: &topology::Stack, console: &Console, merged: &mut Vec<u64>) -> Result<()> {
     let repo = &stack.target.name_with_owner;
     for (i, layer) in stack.layers.iter().enumerate() {
@@ -221,6 +238,11 @@ fn execute(stack: &topology::Stack, console: &Console, merged: &mut Vec<u64>) ->
                     .map(|e| e.branch.clone()),
             ),
         )?;
+        if i == 0 {
+            // Approval of the plan can take arbitrarily long. Recheck the
+            // upper layers against their original bases while we still can.
+            check_stack_readiness(stack)?;
+        }
         // Re-read the immediate PR after the other preflight calls. The API
         // pins its head, but GitHub has no conditional expected-base merge API.
         let fresh = ready_pr(repo, layer, &stack.target.default_branch, None)?;
@@ -275,26 +297,7 @@ pub fn run(opts: &Options) -> Result<()> {
                 .map(|e| e.branch.clone()),
         ),
     )?;
-    // All layers must be ready against their current bases before ANY merge.
-    for (i, layer) in stack.layers.iter().enumerate() {
-        let base = if i == 0 {
-            &stack.target.default_branch
-        } else {
-            &stack.layers[i - 1].branch
-        };
-        let pr = ready_pr(repo, layer, base, None)?;
-        let expected_base = if i == 0 {
-            &stack.base
-        } else {
-            &stack.layers[i - 1].old
-        };
-        if &pr.base_ref_oid != expected_base {
-            bail!(
-                "PR #{} base head changed since fetch; rerun preflight",
-                layer.number
-            );
-        }
-    }
+    check_stack_readiness(&stack)?;
     console.done("all PRs passed initial preflight against their current bases");
     if opts.dry_run {
         console.field("dry run: nothing merged; future retargeted requirements are not guaranteed");

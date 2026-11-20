@@ -270,6 +270,90 @@ pub fn set_delete_branch_on_merge(repo: &str) -> Result<()> {
     Ok(())
 }
 
+// --- stack viewing and navigation ------------------------------------------
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub enum PrState {
+    #[serde(rename = "OPEN")]
+    Open,
+    #[serde(rename = "CLOSED")]
+    Closed,
+    #[serde(rename = "MERGED")]
+    Merged,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewPr {
+    pub number: u64,
+    pub title: String,
+    pub state: PrState,
+    pub is_draft: bool,
+    pub is_cross_repository: bool,
+    pub head_ref_name: String,
+    pub head_ref_oid: String,
+    pub base_ref_name: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub mergeable: Option<String>,
+    pub merge_state_status: Option<String>,
+    pub review_decision: Option<String>,
+}
+
+/// `--json`: number,title,state,isDraft,isCrossRepository,headRefName,
+/// headRefOid,baseRefName; body is needed only for explicit history links.
+/// Viewing also requests mergeable,mergeStateStatus,reviewDecision.
+const VIEW_FIELDS: &str =
+    "number,title,state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefName";
+
+/// List active metadata, or all PRs for one exact head when viewing a closed
+/// branch. gh paginates up to the cap; callers must reject a full result.
+pub fn list_view_prs(
+    repo: &str,
+    head: Option<&str>,
+    history: bool,
+    status: bool,
+) -> Result<Vec<ViewPr>> {
+    let mut fields = if history {
+        format!("{VIEW_FIELDS},body")
+    } else {
+        VIEW_FIELDS.to_owned()
+    };
+    if status {
+        fields.push_str(",mergeable,mergeStateStatus,reviewDecision");
+    }
+    let mut args = vec![
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        if head.is_some() { "all" } else { "open" },
+        "--limit",
+        "1000",
+        "--json",
+        &fields,
+    ];
+    if let Some(head) = head {
+        args.extend(["--head", head]);
+    }
+    serde_json::from_str(&run_capture(&args)?).context("could not parse stack PR list")
+}
+
+/// `--json`: the VIEW_FIELDS metadata plus body for another parent footer.
+pub fn view_pr(repo: &str, number: u64) -> Result<ViewPr> {
+    serde_json::from_str(&run_capture(&[
+        "pr",
+        "view",
+        &number.to_string(),
+        "--repo",
+        repo,
+        "--json",
+        &format!("{VIEW_FIELDS},body"),
+    ])?)
+    .context("could not parse linked PR")
+}
+
 // --- guarded stack merging -------------------------------------------------
 
 #[derive(Debug, Deserialize)]

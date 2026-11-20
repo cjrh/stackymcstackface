@@ -15,6 +15,7 @@ mod rebase;
 mod stack;
 mod topology;
 mod ui;
+mod view;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -28,7 +29,8 @@ mod ui;
                   The push goes to the merge-target remote (the repo where the \
                   PR is created). Stack topology is discovered from `git` and `gh`; \
                   rebase keeps only temporary recovery state. Also supports \
-                  whole-stack rebase and guarded bottom-up merge.",
+                  whole-stack rebase, guarded bottom-up merge, stack viewing, \
+                  and branch navigation.",
     version
 )]
 struct Cli {
@@ -44,6 +46,17 @@ enum Cmd {
     Rebase(rebase::Options),
     /// Merge a fully ready stack bottom-up, stopping safely if requirements change.
     Merge(merge::Options),
+    /// Show the current PR stack and explicitly linked merged/closed history.
+    View,
+    /// Switch to the next (child) PR branch in the active stack.
+    Up,
+    /// Switch to the prior (parent) PR branch in the active stack.
+    Down,
+    /// Switch to a local branch by the PR number shown in `view`.
+    Jump {
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        number: u64,
+    },
     /// Diagnose whether the environment is set up for `push` (read-only).
     Doctor,
 }
@@ -102,6 +115,10 @@ fn main() -> ExitCode {
         Cmd::Push(args) => stack::run(&args.into()),
         Cmd::Rebase(opts) => rebase::run(&opts),
         Cmd::Merge(opts) => merge::run(&opts),
+        Cmd::View => view::run(),
+        Cmd::Up => view::navigate(&view::Direction::Up),
+        Cmd::Down => view::navigate(&view::Direction::Down),
+        Cmd::Jump { number } => view::navigate(&view::Direction::Jump(number)),
         Cmd::Doctor => return doctor::run(),
     };
     match result {

@@ -6,6 +6,7 @@
 //! and makes it possible to swap implementations later (e.g., libgit2) without
 //! touching callers.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -264,6 +265,32 @@ pub fn worktree_in_progress(path: &Path) -> Result<Option<InProgress>> {
     Ok(detect_in_progress(&worktree_git_dir(path)?))
 }
 
+/// Git detaches HEAD during rebase and bisect, but those operations still
+/// reserve the starting branch for their eventual checkout or ref update.
+fn detached_worktree_branch(path: &Path) -> Result<Option<String>> {
+    let dir = worktree_git_dir(path)?;
+    for state in [
+        "rebase-merge/head-name",
+        "rebase-apply/head-name",
+        "BISECT_START",
+    ] {
+        let file = dir.join(state);
+        let value = match std::fs::read_to_string(&file) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("could not read {}", file.display()));
+            }
+        };
+        let branch = value.trim_end_matches(['\r', '\n']);
+        if state == "BISECT_START" {
+            return Ok(Some(format!("refs/heads/{branch}")));
+        }
+        return Ok(branch.starts_with("refs/heads/").then(|| branch.to_owned()));
+    }
+    Ok(None)
+}
+
 pub fn worktree_git_dir(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(run(&[
         "-C",
@@ -351,6 +378,7 @@ pub fn worktrees() -> Result<Vec<Worktree>> {
     for record in output.split("\0\0") {
         let mut path = None;
         let mut branch = None;
+        let mut detached = false;
         for field in record.split('\0') {
             if let Some(p) = field.strip_prefix("worktree ") {
                 path = Some(PathBuf::from(p));
@@ -358,8 +386,12 @@ pub fn worktrees() -> Result<Vec<Worktree>> {
             if let Some(b) = field.strip_prefix("branch ") {
                 branch = Some(b.to_owned());
             }
+            detached |= field == "detached";
         }
         if let Some(path) = path {
+            if detached {
+                branch = detached_worktree_branch(&path)?;
+            }
             result.push(Worktree { path, branch });
         }
     }
@@ -448,12 +480,146 @@ pub fn update_refs(updates: &[(String, String, String)]) -> Result<()> {
     Ok(())
 }
 
+/// Switch only to an existing local branch. Never guess a remote, detach,
+/// reset a branch, or discard worktree changes.
+pub fn switch_local(branch: &str) -> Result<()> {
+    check_branch(branch)?;
+    let reference = format!("refs/heads/{branch}");
+    require_direct_ref(&reference)?;
+    if resolve(&reference)?.is_none() {
+        bail!("branch `{branch}` is not available locally; fetch and create it before navigating");
+    }
+    run(&[
+        "switch",
+        "--no-guess",
+        "--no-overwrite-ignore",
+        "--",
+        branch,
+    ])
+    .map(|_| ())
+}
+
 pub fn checkout(branch: &str) -> Result<()> {
-    run(&["checkout", "--no-guess", branch]).map(|_| ())
+    run(&["checkout", "--no-guess", "--no-overwrite-ignore", branch]).map(|_| ())
 }
 
 pub fn detach() -> Result<()> {
-    run(&["checkout", "--detach"]).map(|_| ())
+    run(&["checkout", "--detach", "--no-overwrite-ignore"]).map(|_| ())
+}
+
+/// Native rebase does not offer checkout's --no-overwrite-ignore. Check the
+/// reset destination and the paths that its commit replay may write.
+pub fn check_rebase_paths(target: &str, replay: Option<(&str, &str)>) -> Result<()> {
+    // Include ignored paths and paths that a replayed commit could make ignored.
+    let untracked = run_raw(&["ls-files", "--full-name", "--others", "-z", "--", ":/"])?;
+    if untracked.is_empty() {
+        return Ok(());
+    }
+
+    let ignore_case = config_get("core.ignorecase")?.is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "" | "true" | "yes" | "on" | "1"
+        )
+    });
+    let normalize = |mut paths: Vec<u8>| {
+        if ignore_case {
+            paths.make_ascii_lowercase();
+        }
+        paths
+    };
+    let tree = normalize(run_raw(&[
+        "ls-tree",
+        "--full-tree",
+        "-r",
+        "--name-only",
+        "-z",
+        target,
+    ])?);
+    let mut candidates: BTreeSet<_> = nul_fields(&tree).collect();
+
+    let mut changes = Vec::new();
+    if let Some((boundary, tip)) = replay {
+        changes = run_raw(&[
+            "diff",
+            "--name-status",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            "--no-relative",
+            "-z",
+            boundary,
+            target,
+            "--",
+        ])?;
+        changes.extend(run_raw(&[
+            "log",
+            "--format=",
+            "--name-status",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-show-signature",
+            "--no-renames",
+            "--no-relative",
+            "-z",
+            &format!("{boundary}..{tip}"),
+            "--",
+        ])?);
+    }
+    let changes = normalize(changes);
+    let mut paths = nul_fields(&changes);
+    let mut changed_roots = BTreeSet::new();
+    let mut may_relocate = false;
+    while let Some(status) = paths.next() {
+        let path = paths.next().context("missing path in Git diff output")?;
+        candidates.insert(path);
+        changed_roots.insert(top_level(path));
+        may_relocate |= status.eq_ignore_ascii_case(b"D");
+    }
+    for original in nul_fields(&untracked) {
+        let path = normalize(original.strip_suffix(b"/").unwrap_or(original).to_vec());
+        let root = top_level(&path);
+        // A directory rename can send incoming paths to a different directory
+        // under a changed root. Err on the side of preserving files there.
+        let relocated = may_relocate
+            && (changed_roots.contains(root)
+                || root
+                    .iter()
+                    .enumerate()
+                    .any(|(end, &byte)| byte == b'~' && changed_roots.contains(&root[..end])));
+        if relocated || path_overlaps(&candidates, &path, replay.is_some()) {
+            bail!(
+                "Git rebase could overwrite an untracked or ignored local path {:?}; move it aside before retrying",
+                String::from_utf8_lossy(original)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn nul_fields(output: &[u8]) -> impl Iterator<Item = &[u8]> {
+    output
+        .split(|&byte| byte == 0)
+        .filter(|field| !field.is_empty())
+}
+
+fn top_level(path: &[u8]) -> &[u8] {
+    path.split(|&byte| byte == b'/').next().unwrap_or_default()
+}
+
+fn path_overlaps(candidates: &BTreeSet<&[u8]>, path: &[u8], replay: bool) -> bool {
+    // A tracked file may replace a directory or vice versa. Replay can also
+    // write conflict files with a "~<side>" suffix.
+    let mut descendants = path.to_vec();
+    descendants.push(b'/');
+    candidates.contains(path)
+        || candidates
+            .range(descendants.as_slice()..)
+            .next()
+            .is_some_and(|entry| entry.starts_with(&descendants))
+        || path.iter().enumerate().any(|(end, &byte)| {
+            (byte == b'/' || (replay && byte == b'~')) && candidates.contains(&path[..end])
+        })
 }
 
 /// Rebase a private branch, retaining empty commits and recording a checkpoint
@@ -549,6 +715,10 @@ pub fn remote_heads(remote: &str) -> Result<std::collections::BTreeMap<String, S
 
 /// Capture stdout of `git <args>` as a trimmed string, erroring on non-zero.
 fn run(args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8_lossy(&run_raw(args)?).trim().to_string())
+}
+
+fn run_raw(args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .args(args)
         .output()
@@ -557,7 +727,7 @@ fn run(args: &[&str]) -> Result<String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("git {} failed: {}", args.join(" "), stderr.trim()));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(output.stdout)
 }
 
 /// Run `git <args>`, dispatching on the requested output handling. `Quiet`
