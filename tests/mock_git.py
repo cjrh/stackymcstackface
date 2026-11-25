@@ -23,7 +23,17 @@ if args and args[0] == 'push':
         subprocess.run([real, '--git-dir', state['bare'], 'update-ref', 'refs/heads/' + state['race_push_branch'], state['base']], check=True)
     if state.get('reject_push'):
         sys.exit('simulated rejected push')
+    result = subprocess.run([real, *args])
+    if result.returncode:
+        sys.exit(result.returncode)
+    # GitHub's PR heads follow successful pushes to the bare remote.
+    for pr in state['prs']:
+        head = subprocess.run([real, '--git-dir', state['bare'], 'rev-parse', '--verify',
+                               'refs/heads/' + pr['headRefName']], capture_output=True, text=True)
+        if head.returncode == 0:
+            pr['headRefOid'] = head.stdout.strip()
+    state_path.write_text(json.dumps(state))
     if state.get('uncertain_push'):
-        subprocess.run([real, *args], check=True)
         sys.exit('connection lost after server accepted the push')
+    sys.exit(0)
 os.execv(real, [real, *args])

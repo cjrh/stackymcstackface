@@ -146,10 +146,11 @@ pub fn fetch(remote: &str, output: GitOutput) -> Result<()> {
 /// Push `branch` to `remote`, setting upstream tracking. Optionally use
 /// `--force-with-lease` for safe re-pushes after a local rebase. Output is
 /// handled per `output`.
-pub fn push(remote: &str, branch: &str, force_with_lease: bool, output: GitOutput) -> Result<()> {
+pub fn push(remote: &str, branch: &str, expected: Option<&str>, output: GitOutput) -> Result<()> {
+    let lease = expected.map(|oid| format!("--force-with-lease=refs/heads/{branch}:{oid}"));
     let mut args = vec!["push", "--set-upstream"];
-    if force_with_lease {
-        args.push("--force-with-lease");
+    if let Some(lease) = &lease {
+        args.push(lease);
     }
     if matches!(output, GitOutput::Stream { verbose: true }) {
         args.push("--verbose");
@@ -369,6 +370,7 @@ pub fn is_clean(path: &Path) -> Result<bool> {
 pub struct Worktree {
     pub path: PathBuf,
     pub branch: Option<String>,
+    pub head: Option<String>,
 }
 
 /// `git worktree list --porcelain -z`, preserving paths containing spaces.
@@ -379,6 +381,7 @@ pub fn worktrees() -> Result<Vec<Worktree>> {
         let mut path = None;
         let mut branch = None;
         let mut detached = false;
+        let mut head = None;
         for field in record.split('\0') {
             if let Some(p) = field.strip_prefix("worktree ") {
                 path = Some(PathBuf::from(p));
@@ -386,13 +389,16 @@ pub fn worktrees() -> Result<Vec<Worktree>> {
             if let Some(b) = field.strip_prefix("branch ") {
                 branch = Some(b.to_owned());
             }
+            if let Some(oid) = field.strip_prefix("HEAD ") {
+                head = Some(oid.to_owned());
+            }
             detached |= field == "detached";
         }
         if let Some(path) = path {
             if detached {
                 branch = detached_worktree_branch(&path)?;
             }
-            result.push(Worktree { path, branch });
+            result.push(Worktree { path, branch, head });
         }
     }
     Ok(result)
@@ -404,6 +410,22 @@ pub fn merge_base(a: &str, b: &str) -> Result<String> {
         bail!("history has no unique merge base");
     }
     Ok(bases)
+}
+
+/// Ask Git for a fork point backed by a historical tip of this ref.
+pub fn fork_point(reference: &str, child: &str) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .args(["merge-base", "--fork-point", reference, child])
+        .output()
+        .context("failed to invoke git merge-base --fork-point")?;
+    match out.status.code() {
+        Some(0) => Ok(Some(String::from_utf8(out.stdout)?.trim().to_owned())),
+        Some(1) => Ok(None),
+        _ => bail!(
+            "git merge-base --fork-point {reference}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    }
 }
 
 pub fn has_merges(base: &str, tip: &str) -> Result<bool> {
@@ -501,6 +523,23 @@ pub fn switch_local(branch: &str) -> Result<()> {
 
 pub fn checkout(branch: &str) -> Result<()> {
     run(&["checkout", "--no-guess", "--no-overwrite-ignore", branch]).map(|_| ())
+}
+
+/// Update a linked checkout without running hooks or overwriting ignored files.
+pub fn checkout_worktree(path: &Path, branch: Option<&str>) -> Result<()> {
+    let mut args = vec![
+        "-C",
+        path.to_str().context("non-UTF-8 worktree path")?,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "checkout",
+        "--no-recurse-submodules",
+        "--no-guess",
+        "--no-overwrite-ignore",
+    ];
+    args.push(branch.unwrap_or("--detach"));
+    run(&args).with_context(|| format!("update worktree checkout at {}", path.display()))?;
+    Ok(())
 }
 
 pub fn detach() -> Result<()> {

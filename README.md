@@ -432,15 +432,18 @@ Answer yes and the tool re-pushes to `upstream` with `--set-upstream`.
 
 ### 5. After a local rebase
 
-Rebasing a stacked branch on top of its (also-rebased) parent is normal.
-Re-run `sms push` with `--force-with-lease`:
+After a local rebase, `sms push` detects a non-fast-forward update in
+PLAN and stops before pushing. If you intend to replace the remote
+history, run:
 
 ```sh
 sms push --force-with-lease
 ```
 
-If a PR for the branch already exists, the tool just refreshes the push
-and prints the existing PR URL. It will not try to recreate it.
+The lease pins the remote-tracking SHA as it was before this command's
+fetch. If the remote moved, inspect and reconcile the fetched changes
+before retrying. On success, EXECUTE reports `pushed (rewritten history)`
+and prints the existing PR URL without recreating the PR.
 
 ### 6. Pushing updates to an existing PR (drop-in `git push`)
 
@@ -471,10 +474,20 @@ From **any branch in the stack**, including a middle branch:
 sms rebase          # update every local stack branch onto fetched main
 # Or choose publication at the start:
 sms rebase --push   # rebase, then atomically publish every branch
+# If stack branches are checked out in other worktrees:
+sms rebase --push --update-worktrees
 ```
 
 The first PR is replayed onto the merge target's fetched default branch.
-Each later PR replays only its own commits onto the rewritten parent.
+Each later PR replays only its own commits onto the rewritten parent, even
+if that parent gained commits since the child forked. If the child already
+contains the parent's current tip, that's the boundary. Otherwise rebase
+uses the parent's local or remote-tracking reflog to establish the fork
+point. This also handles amended or rewritten parents. If neither reflog
+can establish the boundary, rebase stops before replay and prints the
+manual `git rebase --onto` command with a placeholder for the old parent tip.
+PLAN shows the fork point and commit count for each PR.
+
 Unrelated local branches are not moved. Your original checkout is restored
 at the end. Plain `rebase` does not push; afterward you can publish each
 branch with `sms push --force-with-lease` as before. Do not rerun
@@ -504,6 +517,14 @@ Recovery refs retain the originals until cleanup. Git's automatic ref
 updates, autostashing, autosquashing, and rebase hooks are disabled.
 If Git could overwrite an ignored local file during replay or checkout,
 move the file aside and run `sms rebase --continue`.
+
+With `--update-worktrees`, PLAN lists the other checkouts that will be
+updated. They must be clean with no Git operation in progress, and are
+checked again before the ref transaction. Pause editors or agents that
+might modify them until rebase finishes. The file and index updates are
+not atomic with the ref transaction: if a checkout update stops, the
+journal is retained and nothing is published. Resolve the checkout problem,
+then continue or abort from the original worktree.
 
 With `--push`, publication is **one atomic push with an explicit old-SHA
 lease for each branch**. No branch is pushed during conflicts. If a lease
@@ -691,7 +712,9 @@ ambiguous branch reuse.
 `rebase` and `merge` require an unambiguous **linear chain of same-repo open
 PRs rooted at the default branch**, with all stack branches already present
 locally and synchronized with GitHub (publish local commits first). PR bases
-identify the chain; every parent tip must be an ancestor of its child.
+identify the chain. `merge` requires every parent tip to be an ancestor of
+its child; `rebase` can restack stale children if it can establish their
+fork points.
 Cycles, duplicate heads, branching stacks, symbolic branch refs, shallow
 history, replacement refs, grafts, missing refs, and empty layers are refused. `merge` also rejects
 open ancestor PRs outside the selected chain, including equal-SHA aliases.
@@ -702,9 +725,9 @@ silently omitting possible dependents.
 New destructive commands support GitHub.com remotes with exactly one
 fetch URL and one push URL, both identifying the merge-target repository.
 `stack.remote` cannot bypass this check. Enterprise hosts and multiple push
-URLs are not supported yet. `rebase` additionally refuses merge commits in
-replayed history and any stack branch in use by another worktree, including
-one paused in a native rebase or bisect.
+URLs are not supported yet. `rebase` also refuses merge commits in replayed
+history. It refuses stack branches checked out in another worktree unless
+`--update-worktrees` is set and those worktrees are clean and idle.
 `merge` requires clean worktrees for all checked-out stack branches. It
 requires merge commits and automatic head deletion already enabled, no
 required merge queue, and access to the applicable-rules APIs. Large check
@@ -732,13 +755,14 @@ sms push [OPTIONS]
 ```
 
 ```text
-sms rebase [--push]
+sms rebase [--push] [--update-worktrees]
 sms rebase --continue
 sms rebase --abort
 
-      --push       Publish the entire completed stack atomically with leases.
-      --continue   Resume the original operation (remembers its --push choice).
-      --abort      Abort the entire operation, guarding original branch tips.
+      --push              Publish the completed stack atomically with leases.
+      --update-worktrees  Also update clean worktrees on other stack branches.
+      --continue          Resume the operation with its original options.
+      --abort             Abort the operation, guarding original branch tips.
 
 sms merge [OPTIONS]
 

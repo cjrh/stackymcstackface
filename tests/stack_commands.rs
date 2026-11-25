@@ -135,6 +135,37 @@ impl Repo {
         repo
     }
 
+    fn publish_layer(&self, branch: &str, force: bool) {
+        if force {
+            self.git(&["push", "--force-with-lease", "origin", branch]);
+        } else {
+            self.git(&["push", "origin", branch]);
+        }
+        let mut prs = self.state()["prs"].clone();
+        let pr = prs
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|pr| pr["headRefName"] == branch)
+            .unwrap();
+        pr["headRefOid"] = json!(self.git(&["rev-parse", branch]));
+        self.set("prs", prs);
+    }
+
+    fn advance(&self, branch: &str) {
+        self.git(&["checkout", branch]);
+        self.commit(&format!("{branch}2.txt"), &format!("{branch}2\n"));
+        self.publish_layer(branch, false);
+    }
+
+    fn amend(&self, branch: &str) {
+        self.git(&["checkout", branch]);
+        let file = format!("{branch}.txt");
+        fs::write(self.root.join(&file), "amended\n").unwrap();
+        self.git(&["add", &file]);
+        self.git(&["commit", "--amend", "--no-edit"]);
+    }
+
     fn state(&self) -> Value {
         serde_json::from_slice(&fs::read(self.root.join(".git/mock-gh.json")).unwrap()).unwrap()
     }
@@ -239,6 +270,158 @@ fn rebase_whole_chain_from_middle_preserves_layer_boundaries() {
 }
 
 #[test]
+fn rebase_restacks_children_onto_a_parent_with_new_commits() {
+    let repo = Repo::new(0);
+    repo.advance("a");
+    let published = repo.tips();
+    repo.git(&["checkout", "c"]);
+    let plan = ok(repo.sms(&["rebase"]));
+    assert!(!repo.journal().exists());
+    let root = repo.git(&["rev-parse", "a~2"]);
+    for (branch, count, fork) in [
+        ("a", 2, repo.git(&["merge-base", "main", &published[0]])),
+        ("b", 1, repo.old[0].clone()),
+        ("c", 1, repo.old[1].clone()),
+    ] {
+        assert!(plan.contains(&format!("{branch}: {count} commit")));
+        assert!(plan.contains(&format!("fork point {}", &fork[..7])));
+    }
+    assert_eq!(root, repo.git(&["rev-parse", "main"]));
+    for (i, parent, child) in [(1, "a", "b"), (2, "b", "c")] {
+        repo.git(&["merge-base", "--is-ancestor", parent, child]);
+        assert_eq!(
+            repo.git(&["rev-list", "--count", &format!("{parent}..{child}")]),
+            "1"
+        );
+        let range = repo.git(&[
+            "range-diff",
+            &format!("{}..{}", repo.old[i - 1], repo.old[i]),
+            &format!("{parent}..{child}"),
+        ]);
+        assert!(range.contains(" = "), "{range}");
+    }
+    assert_eq!(repo.git(&["show", "c:a2.txt"]), "a2");
+    assert_eq!(repo.remote_tips(), published);
+}
+
+#[test]
+fn rebase_restacks_when_middle_or_several_layers_advanced() {
+    for advance_root in [false, true] {
+        let repo = Repo::new(0);
+        if advance_root {
+            repo.advance("a");
+        }
+        repo.advance("b");
+        repo.git(&["checkout", "a"]);
+        ok(repo.sms(&["rebase"]));
+        for (parent, child, count) in [
+            ("main", "a", if advance_root { "2" } else { "1" }),
+            ("a", "b", "2"),
+            ("b", "c", "1"),
+        ] {
+            repo.git(&["merge-base", "--is-ancestor", parent, child]);
+            assert_eq!(
+                repo.git(&["rev-list", "--count", &format!("{parent}..{child}")]),
+                count
+            );
+        }
+        assert_eq!(repo.git(&["symbolic-ref", "--short", "HEAD"]), "a");
+        assert_eq!(repo.git(&["show", "c:b2.txt"]), "b2");
+        if advance_root {
+            assert_eq!(repo.git(&["show", "c:a2.txt"]), "a2");
+        }
+    }
+}
+
+#[test]
+fn rewritten_parent_requires_reflog_evidence() {
+    for keep in ["local", "remote", "neither"] {
+        let repo = Repo::new(0);
+        repo.amend("a");
+        repo.publish_layer("a", true);
+        repo.git(&["checkout", "c"]);
+        for (which, reference) in [
+            ("local", "refs/heads/a"),
+            ("remote", "refs/remotes/origin/a"),
+        ] {
+            if keep != which {
+                repo.git(&[
+                    "reflog",
+                    "expire",
+                    "--expire=all",
+                    "--expire-unreachable=all",
+                    reference,
+                ]);
+            }
+        }
+        let before = repo.tips();
+        if keep != "neither" {
+            ok(repo.sms(&["rebase"]));
+            assert_eq!(repo.git(&["rev-list", "--count", "a..b"]), "1");
+            assert_eq!(repo.git(&["show", "b:a.txt"]), "amended");
+        } else {
+            let error = fails(
+                repo.sms(&["rebase"]),
+                "git rebase --onto a <old-parent-tip> b",
+            );
+            assert!(error.contains("merge base"));
+            assert_eq!(repo.tips(), before);
+            assert_eq!(
+                repo.git(&[
+                    "for-each-ref",
+                    "refs/stackymcstackface",
+                    "refs/heads/sms-rebase-"
+                ]),
+                ""
+            );
+        }
+        assert!(!repo.journal().exists());
+    }
+}
+
+#[test]
+fn rebase_push_publishes_restack_atomically_with_leases() {
+    for race in [false, true] {
+        let repo = Repo::new(0);
+        repo.advance("a");
+        repo.git(&["checkout", "c"]);
+        let before = repo.remote_tips();
+        if race {
+            repo.set("race_push_branch", json!("b"));
+            fails(repo.sms(&["rebase", "--push"]), "atomic push failed");
+            let mut expected = before;
+            expected[1] = repo.git(&["rev-parse", "main"]);
+            assert_eq!(repo.remote_tips(), expected);
+            assert!(repo.journal().exists());
+        } else {
+            ok(repo.sms(&["rebase", "--push"]));
+            let tips = repo.tips();
+            assert_eq!(repo.remote_tips(), tips);
+            for (pr, tip) in repo.state()["prs"].as_array().unwrap().iter().zip(&tips) {
+                assert_eq!(pr["headRefOid"].as_str(), Some(tip.as_str()));
+            }
+            assert!(!repo.journal().exists());
+        }
+    }
+}
+
+#[test]
+fn abort_after_conflict_on_a_restacked_layer_restores_originals() {
+    let repo = Repo::new(0);
+    repo.git(&["checkout", "b"]);
+    repo.commit("shared", "child\n");
+    repo.publish_layer("b", false);
+    repo.git(&["checkout", "a"]);
+    repo.commit("shared", "parent\n");
+    repo.publish_layer("a", false);
+    let before = repo.tips();
+    fails(repo.sms(&["rebase"]), "rebase stopped");
+    ok(repo.sms(&["rebase", "--abort"]));
+    assert_eq!(repo.tips(), before);
+    assert!(!repo.journal().exists());
+}
+
+#[test]
 fn conflicts_on_multiple_layers_continue_with_staged_and_committed_resolutions() {
     let repo = Repo::new(1);
     fails(repo.sms(&["rebase"]), "rebase stopped");
@@ -310,7 +493,7 @@ fn dirty_unpublished_foreign_rebase_and_other_worktrees_are_rejected() {
     repo.git(&["reset", "--hard", &repo.old[2]]);
     let other = repo.temp.join("other worktree");
     repo.git(&["worktree", "add", other.to_str().unwrap(), "a"]);
-    fails(repo.sms(&["rebase"]), "another worktree");
+    fails(repo.sms(&["rebase"]), "rebase --update-worktrees");
     fs::write(other.join("untracked"), "dirty").unwrap();
     fails(repo.sms(&["merge", "--yes"]), "dirty worktree");
     let conflict = Repo::new(1);
@@ -326,6 +509,157 @@ fn dirty_unpublished_foreign_rebase_and_other_worktrees_are_rejected() {
         "no stack rebase recovery record",
     );
     assert!(!conflict.journal().exists());
+}
+
+#[test]
+fn rebase_updates_clean_foreign_worktrees_and_can_roll_back_after_push_failure() {
+    for reject in [false, true] {
+        let repo = Repo::new(0);
+        repo.advance("a");
+        let old = repo.tips();
+        repo.git(&["checkout", "c"]);
+        let other = repo.temp.join("other worktree");
+        let path = other.to_str().unwrap();
+        repo.git(&["worktree", "add", path, "a"]);
+        repo.set("reject_push", json!(reject));
+        let args = ["rebase", "--update-worktrees", "--push"];
+        if reject {
+            fails(repo.sms(&args), "atomic push failed");
+        } else {
+            assert!(ok(repo.sms(&args)).contains(path));
+        }
+        assert_ne!(repo.tips(), old);
+        assert_eq!(repo.git(&["-C", path, "rev-parse", "HEAD"]), repo.tips()[0]);
+        assert_eq!(
+            repo.git(&["-C", path, "symbolic-ref", "--short", "HEAD"]),
+            "a"
+        );
+        assert_eq!(repo.git(&["-C", path, "status", "--porcelain"]), "");
+        assert_eq!(
+            fs::read_to_string(other.join("upstream.txt")).unwrap(),
+            "upstream\n"
+        );
+        if reject {
+            ok(repo.sms(&["rebase", "--abort"]));
+            assert_eq!(repo.tips(), old);
+            assert_eq!(
+                repo.git(&["-C", path, "symbolic-ref", "--short", "HEAD"]),
+                "a"
+            );
+            assert_eq!(repo.git(&["-C", path, "status", "--porcelain"]), "");
+            assert!(!other.join("upstream.txt").exists());
+        } else {
+            assert_eq!(repo.remote_tips(), repo.tips());
+        }
+    }
+}
+
+#[test]
+fn interrupted_foreign_checkout_update_resumes_before_publication() {
+    let repo = Repo::new(0);
+    let other = repo.temp.join("other worktree");
+    let path = other.to_str().unwrap();
+    repo.git(&["worktree", "add", path, "a"]);
+    fs::write(repo.root.join(".git/info/exclude"), "upstream.txt\n").unwrap();
+    let ignored = other.join("upstream.txt");
+    fs::write(&ignored, "keep me\n").unwrap();
+
+    fails(
+        repo.sms(&["rebase", "--update-worktrees", "--push"]),
+        "foreign worktree update stopped",
+    );
+    assert!(repo.journal().exists());
+    assert_eq!(repo.remote_tips(), repo.old);
+    assert_eq!(fs::read_to_string(&ignored).unwrap(), "keep me\n");
+    assert_eq!(repo.git(&["-C", path, "rev-parse", "HEAD"]), repo.old[0]);
+    assert_ne!(repo.tips(), repo.old);
+
+    fs::rename(&ignored, repo.temp.join("saved")).unwrap();
+    ok(repo.sms(&["rebase", "--continue"]));
+    assert_eq!(repo.remote_tips(), repo.tips());
+    assert_eq!(repo.git(&["-C", path, "status", "--porcelain"]), "");
+    assert_eq!(
+        repo.git(&["-C", path, "symbolic-ref", "--short", "HEAD"]),
+        "a"
+    );
+    assert!(!repo.journal().exists());
+}
+
+#[test]
+fn rebase_rejects_dirty_foreign_worktree_before_start_and_after_conflict() {
+    let repo = Repo::new(2);
+    let other = repo.temp.join("other worktree");
+    repo.git(&["worktree", "add", other.to_str().unwrap(), "a"]);
+    let untracked = other.join("untracked");
+    fs::write(&untracked, "dirty").unwrap();
+    fails(repo.sms(&["rebase", "--update-worktrees"]), "dirty");
+    assert_eq!(repo.tips(), repo.old);
+    assert!(!repo.journal().exists());
+    fs::remove_file(&untracked).unwrap();
+
+    fails(
+        repo.sms(&["rebase", "--update-worktrees"]),
+        "rebase stopped",
+    );
+    fs::write(repo.root.join("shared"), "resolved\n").unwrap();
+    repo.git(&["add", "shared"]);
+    fs::write(&untracked, "dirty").unwrap();
+    fails(repo.sms(&["rebase", "--continue"]), "dirty");
+    assert_eq!(repo.tips(), repo.old);
+    assert!(repo.journal().exists());
+    fs::remove_file(&untracked).unwrap();
+    ok(repo.sms(&["rebase", "--continue"]));
+    assert!(!repo.journal().exists());
+}
+
+#[test]
+fn push_detects_rewrite_during_plan_and_publishes_with_explicit_lease() {
+    let repo = Repo::new(0);
+    repo.amend("c");
+    let output = fails(
+        repo.sms(&["push"]),
+        "stackymcstackface push --force-with-lease",
+    );
+    assert!(output.contains("diverged"));
+    assert!(!output.contains("EXECUTE"));
+    assert!(!repo.root.join(".git/mock-push.log").exists());
+    assert_eq!(repo.remote_tips(), repo.old);
+    assert!(ok(repo.sms(&["push", "--force-with-lease"])).contains("pushed (rewritten history)"));
+    assert_eq!(repo.remote_tips(), repo.tips());
+    assert!(
+        fs::read_to_string(repo.root.join(".git/mock-push.log"))
+            .unwrap()
+            .contains(&format!("--force-with-lease=refs/heads/c:{}", repo.old[2]))
+    );
+}
+
+#[test]
+fn push_force_with_lease_refuses_when_the_remote_moved() {
+    for during_push in [false, true] {
+        let repo = Repo::new(0);
+        repo.amend("c");
+        let moved = repo.git(&["rev-parse", "main"]);
+        if during_push {
+            repo.set("race_push_branch", json!("c"));
+        } else {
+            repo.git(&[
+                "--git-dir",
+                repo.bare.to_str().unwrap(),
+                "update-ref",
+                "refs/heads/c",
+                &moved,
+            ]);
+        }
+        fails(
+            repo.sms(&["push", "--force-with-lease"]),
+            if during_push {
+                "could not push"
+            } else {
+                "stale lease"
+            },
+        );
+        assert_eq!(repo.remote_tips()[2], moved);
+    }
 }
 
 #[test]
@@ -376,6 +710,10 @@ fn paused_rebase_in_another_worktree_reserves_its_branch() {
         );
 
         fails(repo.sms(&["rebase"]), "another worktree");
+        fails(
+            repo.sms(&["rebase", "--update-worktrees"]),
+            "in-progress operation",
+        );
         fails(repo.sms(&["merge", "--yes"]), "in-progress operation");
         assert!(!repo.journal().exists());
         assert_eq!(repo.mutations(), 0);

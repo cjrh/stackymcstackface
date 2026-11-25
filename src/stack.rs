@@ -84,6 +84,14 @@ pub fn run(opts: &StackOpts) -> Result<()> {
     // If a previous push went to the wrong remote, offer to rescue it.
     rescue_wrong_remote(&console, &state, &target_remote, opts.yes)?;
 
+    let tracking_ref = format!("refs/remotes/{target_remote}/{branch}");
+    // Fetch is for planning, not permission to overwrite a remote change
+    // the user hasn't seen. Pin the lease before refreshing tracking refs.
+    let expected = if opts.force_with_lease {
+        Some(git::resolve(&tracking_ref)?.unwrap_or_default())
+    } else {
+        None
+    };
     git_step(
         &console,
         opts.verbose,
@@ -93,6 +101,35 @@ pub fn run(opts: &StackOpts) -> Result<()> {
                 .with_context(|| format!("git fetch {target_remote} failed"))
         },
     )?;
+
+    let fetched = git::resolve(&tracking_ref)?;
+    let non_fast_forward = if let Some(fetched) = &fetched {
+        if !git::is_ancestor(fetched, &state.head_sha)? {
+            if expected.is_none() {
+                let reason = if git::is_ancestor(&state.head_sha, fetched)? {
+                    "local branch is behind the remote"
+                } else {
+                    "local branch diverged from the remote (possible rewritten history)"
+                };
+                console.field(reason);
+                bail!(
+                    "review the remote changes first; if the rewrite is intentional, retry with: stackymcstackface push --force-with-lease"
+                );
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if let Some(expected) = &expected
+        && fetched.as_deref().unwrap_or_default() != expected
+    {
+        bail!(
+            "remote branch changed since the last fetch (stale lease); inspect and reconcile the fetched changes before retrying"
+        );
+    }
 
     let prs = console.spinner("scanning open pull requests", || {
         gh::list_open_prs(&target_repo.name_with_owner)
@@ -106,7 +143,15 @@ pub fn run(opts: &StackOpts) -> Result<()> {
         .cloned();
 
     let (headline, note) = plan_sentence(&parent, existing.as_ref(), &branch);
-    console.plan(&headline, note.as_deref());
+    let rewritten = format!("push rewritten history to {branch} with an explicit lease");
+    console.plan(
+        if non_fast_forward {
+            &rewritten
+        } else {
+            &headline
+        },
+        note.as_deref(),
+    );
 
     console.section("EXECUTE");
 
@@ -126,14 +171,22 @@ pub fn run(opts: &StackOpts) -> Result<()> {
         opts.verbose,
         &format!("pushing {branch} → {target_remote}"),
         |out| {
-            git::push(&target_remote, &branch, opts.force_with_lease, out).with_context(|| {
-                format!(
-                    "git push {target_remote} {branch} failed -- if you rebased, retry with --force-with-lease"
-                )
+            git::push(&target_remote, &branch, expected.as_deref(), out).with_context(|| {
+                let hint = if expected.is_some() {
+                    "; check whether the remote moved before retrying"
+                } else {
+                    "; if you intentionally rebased, retry with `stackymcstackface push --force-with-lease`"
+                };
+                format!("could not push {branch} to {target_remote}{hint}")
             })
         },
     )?;
-    console.done(&format!("pushed {branch} to {target_remote}"));
+    let result = if non_fast_forward {
+        "pushed (rewritten history)"
+    } else {
+        "pushed"
+    };
+    console.done(&format!("{result} {branch} to {target_remote}"));
 
     if let Some(pr) = existing {
         console.url(&pr.url);

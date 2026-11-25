@@ -92,12 +92,21 @@ pub struct Layer {
     pub boundary: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForeignWorktree {
+    pub path: PathBuf,
+    pub git_dir: PathBuf,
+    pub branch: String,
+}
+
 pub struct Stack {
     pub target: gh::RepoInfo,
     pub remote: String,
     pub original_branch: String,
     pub base: String,
     pub layers: Vec<Layer>,
+    pub foreign: Vec<ForeignWorktree>,
 }
 
 /// Follow both directions so invocation from a middle branch still selects the
@@ -153,33 +162,64 @@ pub fn linear_stack(prs: &[gh::OpenPr], current: &str, default: &str) -> Result<
     Ok(result)
 }
 
-pub fn check_worktrees(layers: &[Layer], rebase: bool) -> Result<()> {
+pub fn require_clean_worktree(path: &Path) -> Result<()> {
+    if git::worktree_in_progress(path)?.is_some() || !git::is_clean(path)? {
+        bail!(
+            "stack branch has a dirty worktree or in-progress operation: {}; finish the operation or commit/stash your changes first",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+pub fn check_worktrees(
+    layers: &[Layer],
+    rebase: bool,
+    update_worktrees: bool,
+) -> Result<Vec<ForeignWorktree>> {
     let owner = git::git_dir()?;
+    let mut foreign = Vec::new();
     for wt in git::worktrees()? {
-        if !layers
-            .iter()
-            .any(|l| wt.branch.as_deref() == Some(&format!("refs/heads/{}", l.branch)))
-        {
+        let Some(branch) = wt
+            .branch
+            .as_deref()
+            .and_then(|r| r.strip_prefix("refs/heads/"))
+        else {
+            continue;
+        };
+        if !layers.iter().any(|l| l.branch == branch) {
             continue;
         }
+        let git_dir = git::worktree_git_dir(&wt.path)?;
         if rebase {
-            // The current worktree is allowed; all other checkouts are refused,
-            // even clean ones, because changing their branch ref stales the index.
-            let current = git::worktree_git_dir(&wt.path)?;
-            if current != owner {
+            if git_dir == owner {
+                continue;
+            }
+            if !update_worktrees {
                 bail!(
-                    "stack branch is checked out in another worktree: {}",
+                    "stack branch is checked out in another worktree: {}; retry with `stackymcstackface rebase --update-worktrees` to update clean checkouts",
                     wt.path.display()
                 );
             }
-        } else if !git::is_clean(&wt.path)? || git::worktree_in_progress(&wt.path)?.is_some() {
-            bail!(
-                "stack branch has a dirty worktree or in-progress operation: {}",
-                wt.path.display()
-            );
+            require_clean_worktree(&wt.path)?;
+            if foreign
+                .iter()
+                .any(|other: &ForeignWorktree| other.branch == branch)
+            {
+                bail!(
+                    "branch `{branch}` is checked out in multiple worktrees; detach the extra checkouts and retry"
+                );
+            }
+            foreign.push(ForeignWorktree {
+                path: wt.path,
+                git_dir,
+                branch: branch.to_owned(),
+            });
+        } else {
+            require_clean_worktree(&wt.path)?;
         }
     }
-    Ok(())
+    Ok(foreign)
 }
 
 /// A PR with the wrong base can still be merged indirectly through ancestry.
@@ -205,7 +245,43 @@ pub fn check_indirect_merges(prs: &[gh::OpenPr], layers: &[Layer]) -> Result<()>
     Ok(())
 }
 
-pub fn discover(rebase: bool) -> Result<Stack> {
+fn rebase_boundary(parent: &Layer, child: &str, tip: &str, remote: &str) -> Result<String> {
+    let manual = format!(
+        "identify the old parent tip, then run `git rebase --onto {} <old-parent-tip> {child}`",
+        parent.branch
+    );
+    let base = git::merge_base(&parent.old, tip).with_context(|| {
+        format!(
+            "cannot find a unique merge base for parent `{}` and child `{child}`; {manual}",
+            parent.branch
+        )
+    })?;
+    let mut boundary: Option<String> = None;
+    for reference in [
+        format!("refs/heads/{}", parent.branch),
+        format!("refs/remotes/{remote}/{}", parent.branch),
+    ] {
+        let Some(candidate) = git::fork_point(&reference, tip)? else {
+            continue;
+        };
+        if !git::is_ancestor(&base, &candidate)? || !git::is_ancestor(&candidate, tip)? {
+            continue;
+        }
+        match &boundary {
+            Some(previous) if git::is_ancestor(&candidate, previous)? => continue,
+            Some(previous) if !git::is_ancestor(previous, &candidate)? => {
+                bail!(
+                    "conflicting fork points for parent `{}` and child `{child}` (merge base {base}); {manual}",
+                    parent.branch
+                );
+            }
+            _ => boundary = Some(candidate),
+        }
+    }
+    boundary.with_context(|| format!("cannot prove fork point for parent `{}` and child `{child}` (merge base {base}); {manual}", parent.branch))
+}
+
+pub fn discover(rebase: bool, update_worktrees: bool) -> Result<Stack> {
     no_rebase()?;
     let original_branch = clean_state()?;
     git::require_full_history()?;
@@ -226,14 +302,15 @@ pub fn discover(rebase: bool) -> Result<Stack> {
     git::fetch_heads(&remote)?;
     let prs = gh::list_open_prs(&format!("https://github.com/{}", target.name_with_owner))?;
     let ordered = linear_stack(&prs, &original_branch, &target.default_branch)?;
-    let base = git::resolve(&format!("refs/remotes/{remote}/{}", target.default_branch))?
-        .context("default branch was not fetched")?;
+    let base = git::resolve(&format!("refs/remotes/{remote}/{}", target.default_branch))?.context(
+        "default branch was not fetched; check that it exists on the merge-target remote and retry",
+    )?;
     let mut layers: Vec<Layer> = Vec::new();
     for pr in ordered {
         git::check_branch(&pr.head_ref_name)?;
         git::require_direct_ref(&format!("refs/heads/{}", pr.head_ref_name))?;
         let local = git::resolve(&format!("refs/heads/{}", pr.head_ref_name))?
-            .with_context(|| format!("stack branch `{}` must exist locally", pr.head_ref_name))?;
+            .with_context(|| format!("stack branch `{}` must exist locally; fetch and create it from the merge-target remote", pr.head_ref_name))?;
         let fetched = git::resolve(&format!("refs/remotes/{remote}/{}", pr.head_ref_name))?;
         if local != pr.head_ref_oid || fetched.as_deref() != Some(&local) {
             bail!(
@@ -243,23 +320,31 @@ pub fn discover(rebase: bool) -> Result<Stack> {
         }
         let boundary = match layers.last() {
             Some(parent) => {
-                if !git::is_ancestor(&parent.old, &local)? {
+                if git::is_ancestor(&parent.old, &local)? {
+                    parent.old.clone()
+                } else if rebase {
+                    rebase_boundary(parent, &pr.head_ref_name, &local, &remote)?
+                } else {
                     bail!(
                         "parent `{}` is not an ancestor of `{}`; restack manually first",
                         parent.branch,
                         pr.head_ref_name
                     );
                 }
-                parent.old.clone()
             }
-            None => git::merge_base(&base, &local)?,
+            None => git::merge_base(&base, &local).with_context(|| {
+                format!("find a common base for `{}` and `{}`; correct the PR base or restack manually first", pr.head_ref_name, target.default_branch)
+            })?,
         };
         if boundary == local {
-            bail!("branch `{}` has no commits of its own", pr.head_ref_name);
+            bail!(
+                "branch `{}` has no commits of its own; add and publish commits or remove the empty PR from the stack",
+                pr.head_ref_name
+            );
         }
         if rebase && git::has_merges(&boundary, &local)? {
             bail!(
-                "branch `{}` contains merge commits; automatic stack rebase supports linear commit histories only",
+                "branch `{}` contains merge commits; linearize its own commits manually and publish before retrying",
                 pr.head_ref_name
             );
         }
@@ -270,7 +355,7 @@ pub fn discover(rebase: bool) -> Result<Stack> {
             boundary,
         });
     }
-    check_worktrees(&layers, rebase)?;
+    let foreign = check_worktrees(&layers, rebase, update_worktrees)?;
     if !rebase {
         check_indirect_merges(&prs, &layers)?;
     }
@@ -280,6 +365,7 @@ pub fn discover(rebase: bool) -> Result<Stack> {
         original_branch,
         base,
         layers,
+        foreign,
     })
 }
 

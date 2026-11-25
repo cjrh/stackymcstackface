@@ -15,15 +15,27 @@ use crate::{gh, git, topology, ui::Console};
 
 #[derive(clap::Args, Debug)]
 pub struct Options {
-    /// Resume the recorded stack rebase after resolving and staging conflicts.
-    #[arg(long = "continue", conflicts_with_all = ["abort", "push"])]
+    /// Resume in the original worktree using the recorded options.
+    ///
+    /// Stage conflict resolutions first. Also use this to resume an interrupted
+    /// checkout update or check the result of an uncertain push.
+    #[arg(long = "continue", conflicts_with_all = ["abort", "push", "update_worktrees"])]
     pub resume: bool,
-    /// Abort the whole stack rebase, restoring original local branch tips.
-    #[arg(long, conflicts_with = "push")]
+    /// Roll back the local stack rebase from the original worktree.
+    ///
+    /// Restores original branch tips and checkouts. If publication was attempted,
+    /// rollback is allowed only if the remote still has all original tips.
+    #[arg(long, conflicts_with_all = ["push", "update_worktrees"])]
     pub abort: bool,
     /// Atomically publish all branches with explicit leases after replay succeeds.
     #[arg(long)]
     pub push: bool,
+    /// Also update clean worktrees on other stack branches.
+    ///
+    /// PLAN lists the affected paths. Pause any agents or editors changing them.
+    /// Dirty worktrees and Git operations in progress block the update.
+    #[arg(long)]
+    pub update_worktrees: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,6 +71,8 @@ struct Journal {
     push: bool,
     phase: Phase,
     entries: Vec<Entry>,
+    #[serde(default)]
+    foreign: Vec<topology::ForeignWorktree>,
 }
 
 impl Journal {
@@ -118,15 +132,30 @@ impl Journal {
         }
         git::check_branch(&self.default_branch)?;
         let mut names = std::collections::BTreeSet::new();
-        for (i, entry) in self.entries.iter().enumerate() {
+        for entry in &self.entries {
             git::check_branch(&entry.layer.branch)?;
             if !names.insert(&entry.layer.branch)
                 || !sha(&entry.layer.old)
                 || !sha(&entry.layer.boundary)
                 || entry.new.as_deref().is_some_and(|s| !sha(s))
-                || (i > 0 && entry.layer.boundary != self.entries[i - 1].layer.old)
+                || entry.layer.boundary == entry.layer.old
+                || !git::is_ancestor(&entry.layer.boundary, &entry.layer.old)?
             {
                 bail!("invalid branch/boundary in stack rebase record");
+            }
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        let mut dirs = std::collections::BTreeSet::new();
+        let mut branches = std::collections::BTreeSet::new();
+        for wt in &self.foreign {
+            if wt.branch == self.original_branch
+                || !names.contains(&wt.branch)
+                || wt.git_dir == self.worktree_git_dir
+                || !paths.insert(&wt.path)
+                || !dirs.insert(&wt.git_dir)
+                || !branches.insert(&wt.branch)
+            {
+                bail!("invalid foreign worktree in rebase record");
             }
         }
         if !names.contains(&self.original_branch) {
@@ -181,24 +210,79 @@ impl Journal {
         Ok(())
     }
 
-    fn check_worktrees(&self) -> Result<()> {
-        topology::check_worktrees(
-            &self
+    /// Return whether each recorded worktree is attached. A detached checkout
+    /// at a recorded tip is recoverable only during install or rollback.
+    fn check_worktrees(&self) -> Result<Vec<bool>> {
+        let worktrees = git::worktrees()?;
+        for wt in &worktrees {
+            let Some(branch) = &wt.branch else { continue };
+            let private = (0..self.entries.len()).any(|i| branch == &self.stage(i));
+            let original = self
                 .entries
                 .iter()
-                .map(|e| e.layer.clone())
-                .collect::<Vec<_>>(),
-            true,
-        )?;
-        for wt in git::worktrees()? {
-            if (0..self.entries.len()).any(|i| wt.branch.as_deref() == Some(&self.stage(i)))
+                .any(|e| branch == &format!("refs/heads/{}", e.layer.branch));
+            if (original || private)
                 && git::worktree_git_dir(&wt.path)? != self.worktree_git_dir
+                && (private
+                    || !self.foreign.iter().any(|w| {
+                        w.path == wt.path && branch == &format!("refs/heads/{}", w.branch)
+                    }))
             {
                 bail!(
-                    "private rebase branch is checked out in another worktree: {}",
+                    "unexpected stack branch checkout in another worktree: {}; restore the recorded checkouts before retrying",
                     wt.path.display()
                 );
             }
+        }
+        self.foreign.iter().map(|record| {
+            let entry = self.entries.iter().find(|e| e.layer.branch == record.branch).context("unknown worktree branch")?;
+            let wt = worktrees.iter().find(|wt| wt.path == record.path).with_context(|| format!("recorded worktree is missing: {}", record.path.display()))?;
+            if git::worktree_git_dir(&wt.path)? != record.git_dir {
+                bail!("recorded worktree identity changed: {}", wt.path.display());
+            }
+            topology::require_clean_worktree(&wt.path)?;
+            if wt.branch.as_deref() == Some(&format!("refs/heads/{}", record.branch)) {
+                return Ok(true);
+            }
+            if matches!(self.phase, Phase::Applying | Phase::Aborting) && wt.branch.is_none()
+                && (wt.head.as_ref() == Some(&entry.layer.old) || (wt.head.is_some() && wt.head == entry.new))
+            {
+                return Ok(false);
+            }
+            bail!("recorded worktree checkout changed: {}; restore its recorded checkout before retrying", wt.path.display());
+        }).collect()
+    }
+
+    fn detach_foreign(&self) -> Result<()> {
+        for (wt, attached) in self.foreign.iter().zip(self.check_worktrees()?) {
+            if attached {
+                topology::require_clean_worktree(&wt.path)?;
+                git::checkout_worktree(&wt.path, None)?;
+            }
+        }
+        if self.check_worktrees()?.into_iter().any(|attached| attached) {
+            bail!(
+                "a recorded worktree was reattached before the ref transaction; stop concurrent Git operations and retry"
+            );
+        }
+        Ok(())
+    }
+
+    fn attach_foreign(&self) -> Result<()> {
+        for (wt, attached) in self.foreign.iter().zip(self.check_worktrees()?) {
+            if !attached {
+                topology::require_clean_worktree(&wt.path)?;
+                git::checkout_worktree(&wt.path, Some(&wt.branch)).context("foreign worktree update stopped; resolve the checkout problem and retry, or use `rebase --abort`")?;
+            }
+        }
+        if self
+            .check_worktrees()?
+            .into_iter()
+            .any(|attached| !attached)
+        {
+            bail!(
+                "a recorded worktree was detached during checkout updates; stop concurrent Git operations and retry"
+            );
         }
         Ok(())
     }
@@ -473,8 +557,10 @@ fn resume(j: &mut Journal, path: &Path, console: &Console) -> Result<()> {
                 let stage = j.stage(j.entries.len() - 1);
                 git::checkout(stage.trim_start_matches("refs/heads/"))?;
                 if !j.check_originals()? {
+                    j.detach_foreign()?;
                     git::update_refs(&j.local_updates(false)?)?;
                 }
+                j.attach_foreign()?;
                 j.phase = if j.push {
                     Phase::Publishing
                 } else {
@@ -590,8 +676,10 @@ fn abort(j: &mut Journal, path: &Path, console: &Console) -> Result<()> {
     // when rolling that branch back via update-ref.
     git::detach()?;
     if applied {
+        j.detach_foreign()?;
         git::update_refs(&j.local_updates(true)?)?;
     }
+    j.attach_foreign()?;
     git::checkout(&j.original_branch)?;
     j.cleanup(path)?;
     console.done("aborted the whole stack rebase; original branches restored");
@@ -612,14 +700,33 @@ pub fn run(opts: &Options) -> Result<()> {
             resume(&mut j, &path, &console)
         };
     }
-    let stack = topology::discover(true)?;
+    let stack = topology::discover(true, opts.update_worktrees)?;
     console.section("PLAN");
     console.field(&format!(
         "{} · remote {} · onto {}",
         stack.target.name_with_owner, stack.remote, stack.target.default_branch
     ));
-    for e in &stack.layers {
-        console.field(&format!("#{} {}", e.number, e.branch));
+    for (i, e) in stack.layers.iter().enumerate() {
+        let count = git::commits_between(&e.boundary, &e.old)?;
+        let noun = if count == 1 { "commit" } else { "commits" };
+        let onto = if i == 0 {
+            stack.target.default_branch.clone()
+        } else {
+            format!("rewritten #{}", stack.layers[i - 1].number)
+        };
+        console.field(&format!(
+            "#{} {}: {count} {noun}, fork point {} → onto {onto}",
+            e.number,
+            e.branch,
+            &e.boundary[..7]
+        ));
+    }
+    for wt in &stack.foreign {
+        console.field(&format!(
+            "update worktree for {}: {}",
+            wt.branch,
+            wt.path.display()
+        ));
     }
     console.field(if opts.push {
         "rebase locally, then atomically publish the entire stack"
@@ -642,6 +749,7 @@ pub fn run(opts: &Options) -> Result<()> {
         base: stack.base,
         push: opts.push,
         phase: Phase::Preparing,
+        foreign: stack.foreign,
         entries: stack
             .layers
             .into_iter()

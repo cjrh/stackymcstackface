@@ -154,7 +154,7 @@ fn check_local(stack: &topology::Stack) -> Result<()> {
     topology::no_rebase()?;
     topology::clean_state()?;
     git::require_full_history()?;
-    topology::check_worktrees(&stack.layers, false)?;
+    topology::check_worktrees(&stack.layers, false, false)?;
     for layer in &stack.layers {
         git::require_direct_ref(&format!("refs/heads/{}", layer.branch))?;
         if git::resolve(&format!("refs/heads/{}", layer.branch))?.as_deref() != Some(&layer.old) {
@@ -277,7 +277,7 @@ pub fn run(opts: &Options) -> Result<()> {
     let _lock = topology::lock()?;
     let console = Console::detect();
     console.banner();
-    let stack = topology::discover(false)?;
+    let stack = topology::discover(false, false)?;
     let repo = &stack.target.name_with_owner;
     console.section("PLAN");
     console.field(&format!(
